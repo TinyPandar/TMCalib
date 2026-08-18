@@ -1,0 +1,11 @@
+# Python 3.8 environment verified on the measurement workstation.
+# Install the CUDA-specific PyTorch build separately (see README.md).
+numpy==1.24.4
+scipy==1.10.1
+matplotlib==3.7.5
+Pillow==10.4.0
+opencv-python==5.0.0.93
+tqdm==4.70.0
+scikit-image==0.21.0
+
+# PySpin and the JUOPT runtime are supplied by their hardware vendors.

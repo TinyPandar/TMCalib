@@ -1,0 +1,89 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+.conda/
+build/
+dist/
+*.egg-info/
+
+# IDE and operating-system state
+.idea/
+.vscode/*.local.json
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs and interrupted output
+*.log
+*.partial
+*.tmp
+*.progress.json
+
+# Numerical experiment data and generated artifacts
+*.npy
+*.npz
+*.raw
+*.memmap
+*.dat
+*.bin
+*.csv
+*.bmp
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+
+# Keep future deliberately-small test fixtures opt-in.
+!tests/fixtures/**/*.npy
+!tests/fixtures/**/*.npz
+
+# Generated directories
+/camera_*/
+/digit1_dmd_pattern_*/
+/extracted_patterns_*/
+/manual_dmd_patterns/
+/measurements*/
+/measurement_intensity_report_*/
+/pixelwise_focus_report_*/
+/pixelwise_focus_results*/
+/pregenerated_patterns*/
+/physical_jones_tm_output*/
+/physical_jones_tm_runs/
+
+# Generated reconstruction/report metadata
+/average_speckle_intensity_*.json
+/measurement*.json
+/probe_*.json
+/speckle*.json
+/tm_reconstruction_*.json
+
+# Vendor binaries and SDKs are installed separately.
+*.dll
+*.pyd
+*.lib
+*.exp
+**/JUOPT_DLP V4.0.002 20250522 release/
+
+# Source history belongs in Git, not filename snapshots.
+*.backup.py
+*.copy.py
+*_works.py
+
+# Notebook transient state
+.ipynb_checkpoints/

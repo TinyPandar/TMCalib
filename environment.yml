@@ -1,0 +1,18 @@
+name: tmcalib
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.8
+  - pip
+  - numpy=1.24.4
+  - scipy=1.10.1
+  - matplotlib=3.7.5
+  - pillow=10.4.0
+  - tqdm=4.70.0
+  - scikit-image=0.21.0
+  - pytorch=2.4.1
+  - pytorch-cuda=12.1
+  - pip:
+      - opencv-python==5.0.0.93

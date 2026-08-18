@@ -1,0 +1,2 @@
+# Optional SSH-based remote reconstruction support.
+paramiko>=3.4,<4
