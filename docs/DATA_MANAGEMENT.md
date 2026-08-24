@@ -12,14 +12,15 @@ Git 只保存源码、测试、Notebook 和文档。以下内容由 `.gitignore`
 
 ## 典型数据规模
 
-以 128×128 输入、8N Probe 为例：
+| 输入与 Pattern 集 | 相机输出 | Probe + Pattern | 测量矩阵（uint16） | TM（complex64） |
+| --- | --- | ---: | ---: | ---: |
+| 128×128，8N | 128×128 | 约 112 GiB | 4 GiB | 2 GiB |
+| 128×128，8N | 26×26 | 共用上行数据 | 169 MiB | 84.5 MiB |
+| 160×120，8N | 128×128 | 134.5 GiB | 4.69 GiB | 2.34 GiB |
 
-| 相机输出 | 测量矩阵（uint16） | TM（complex64） |
-| --- | ---: | ---: |
-| 128×128 | 4 GiB | 2 GiB |
-| 26×26 | 169 MiB | 84.5 MiB |
+160×120 Profile 包含 153,600 个 Probe。其 Pattern 逐帧覆盖完整 1024×768 DMD，单独 Pattern 数组约 112.5 GiB；complex64 Probe 约 22.0 GiB。生成、测量和重建放在同一磁盘时，还需为测量、TM、缓存和临时文件预留额外空间。
 
-两种输出共用的完整 8N Pattern 与 Probe 约 112 GiB，因此不适合普通 Git 或 Git LFS。
+完整 Pattern 与 Probe 不适合普通 Git 或 Git LFS。
 
 ## 实验归档建议
 

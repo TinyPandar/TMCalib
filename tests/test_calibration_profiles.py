@@ -13,6 +13,12 @@ class CalibrationProfileTests(unittest.TestCase):
         self.assertEqual(PROFILES["dense_128x128"].camera_roi, (128, 128))
         self.assertEqual(PROFILES["dense_128x128_roi26"].camera_roi, (26, 26))
 
+        fivefold = PROFILES["fivefold_160x120"]
+        self.assertEqual(fivefold.input_shape, (120, 160))
+        self.assertEqual(fivefold.camera_roi, (128, 128))
+        self.assertEqual(fivefold.active_shape, (768, 1024))
+        self.assertNotIn("test64", fivefold.capabilities)
+
     def test_polarization_channel_is_canonical(self):
         self.assertEqual(normalize_polarization_channel("i90"), "I90")
         with self.assertRaises(ValueError):

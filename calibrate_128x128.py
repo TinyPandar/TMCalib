@@ -1717,7 +1717,7 @@ class DMDController:
         ):
             if not self.test_mode:
                 raise FileNotFoundError(
-                    "Full 128 x 128 probe data are not present. Generate them "
+                    f"Full {N_x} x {N_y} probe data are not present. Generate them "
                     "with a streaming/full-calibration workflow first."
                 )
             print("Pre-generated optical-test data missing; generating them now...")
@@ -1729,7 +1729,7 @@ class DMDController:
             )
 
         print("\n" + "=" * 70)
-        print("Loading pre-generated 128 x 128 patterns...")
+        print(f"Loading pre-generated {N_x} x {N_y} patterns...")
         print("=" * 70)
         P = np.load(probe_file, mmap_mode="r")
         full_patterns = np.load(pattern_file, mmap_mode="r")
@@ -1744,7 +1744,9 @@ class DMDController:
             "active_shape": [self.active_height, self.active_width],
             "active_offset_xy": [self.active_x, self.active_y],
             "dmd_shape": [self.original_height, self.original_width],
-            "mapping_version": "aligned_active512_v1",
+            "mapping_version": self.full_pattern_config.get(
+                "mapping_version", "aligned_active512_v1"
+            ),
             "reconstruction_ready": False if self.test_mode else True,
         }
         for key, expected_value in expected_metadata.items():
@@ -4650,7 +4652,7 @@ class Application(tk.Tk):
                 self.after(
                     0,
                     lambda: self.log(
-                        "[1/4] Measuring all 65,536 probe patterns..."
+                        f"[1/4] Measuring all {controller.full_probe_count:,} probe patterns..."
                     ),
                 )
                 controller.measure_progress_callback = measurement_progress
