@@ -63,29 +63,63 @@ For `v4_32x24`:
 - TM convention: `[N_output, N_input]`
 
 The calibration probes used to reconstruct `T0` are valid as a smoke test, but
-for a meaningful correction/validation experiment it is better to collect a
-separate set of random phase/amplitude inputs after TM reconstruction.
+for a meaningful correction/validation experiment use a separate random
+amplitude+phase dataset. Reusing the GGS21 phase-only probes mostly tests the
+same regime that created the TM and can hide amplitude-dependent mismatch.
 
-## Run
+## Dedicated random complex correction dataset
 
-Example for the 32x24 profile:
+Generate 512 post-reconstruction probes. The default amplitudes use 8 levels
+from 0.2 to 1.0 and the phase uses 16 levels over `[0, 2pi)`:
 
 ```powershell
-python -m tools.run_tm_grad_correction ^
-  --profile v4_32x24 ^
-  --tm reconstructed_field.npy ^
-  --probes correction_probes.npy ^
-  --measurements correction_measurements.npy ^
-  --phase-modes 4 4 ^
-  --amplitude-modes 2 2 ^
-  --max-probes 256 ^
-  --output-pixels 1024 ^
-  --epochs 200 ^
+python -m tools.generate_complex_correction_probes_32x24 `
+  --count 512 `
+  --amplitude-levels 8 `
+  --amplitude-min 0.2 `
+  --phase-levels 16
+```
+
+This writes `correction_patterns_32x24_complex/probe.npy` plus the corresponding
+`768x1024` DMD patterns. The default 512-pattern bitmap file is about 0.38 GiB.
+The logical complex values are encoded with the same 4x4 super-pixel LUT and
+32x32 logical-pixel geometry as the `v4_32x24` measurement path.
+
+On the Windows measurement workstation, initialize the optical path as usual
+and acquire this dataset with the dedicated CLI:
+
+```powershell
+python -m tools.acquire_complex_correction_32x24 `
+  --pattern-dir correction_patterns_32x24_complex `
+  --output correction_measurements_memmap.npy
+```
+
+The acquisition script reuses `CameraHandler` and `DMDController` from
+`calibrate_v4_32x24.py`, but writes a separate headerless `uint16` memmap. It
+does not overwrite `measurements_memmap.npy` used by GGS21.
+
+## Run gradient correction
+
+Example for the dedicated complex dataset:
+
+```powershell
+python -m tools.run_tm_grad_correction `
+  --profile v4_32x24 `
+  --tm reconstructed_field.npy `
+  --probes correction_patterns_32x24_complex\probe.npy `
+  --measurements correction_measurements_memmap.npy `
+  --phase-modes 4 4 `
+  --amplitude-modes 2 2 `
+  --max-probes 512 `
+  --output-pixels 1024 `
+  --epochs 200 `
   --device cuda
 ```
 
 `--output-pixels 1024` trains against a fixed random subset of camera pixels so
 the matrix multiplication stays small. Set it to `0` to use all camera pixels.
+For the dedicated dataset, `--max-probes 512` uses all generated samples before
+the internal train/validation split.
 
 The output directory contains:
 
@@ -99,22 +133,32 @@ The output directory contains:
 By default the full corrected TM is **not** written. Use `--export-tm` only when
 needed; for dense 128x128 configurations it can be multiple GiB.
 
+If no epoch beats the zero-correction held-out validation PCC, the CLI now
+restores the identity correction instead of exporting a worse last-epoch model.
+`summary.json` records this as `reverted_to_baseline: true`.
+
 ## First experiment to run
 
 Start with only phase correction:
 
 ```powershell
-python -m tools.run_tm_grad_correction ... ^
-  --phase-modes 4 4 ^
-  --amplitude-modes 0 0
+python -m tools.run_tm_grad_correction `
+  --profile v4_32x24 `
+  --tm reconstructed_field.npy `
+  --probes correction_patterns_32x24_complex\probe.npy `
+  --measurements correction_measurements_memmap.npy `
+  --phase-modes 4 4 `
+  --amplitude-modes 0 0 `
+  --max-probes 512 `
+  --output-pixels 1024 `
+  --epochs 200 `
+  --device cuda
 ```
 
-Then compare against phase + amplitude:
+Then compare against phase + amplitude by changing only:
 
 ```powershell
-python -m tools.run_tm_grad_correction ... ^
-  --phase-modes 4 4 ^
-  --amplitude-modes 2 2
+--phase-modes 4 4 --amplitude-modes 2 2
 ```
 
 The important number is held-out validation PCC, not training PCC. If
@@ -122,6 +166,17 @@ validation PCC improves clearly with only ~15-20 parameters, that is evidence
 that a useful part of the TM mismatch lies on a low-dimensional correction
 manifold. If training improves but validation does not, increasing correction
 dimension is unlikely to help without changing the error model.
+
+The most useful initial comparison is therefore:
+
+1. original TM on the new amplitude+phase probes
+2. phase-only DCT correction
+3. phase + amplitude DCT correction
+
+If the original TM reproduces the previously observed amplitude-domain drop but
+DCT correction cannot improve held-out PCC, the next model should add structured
+mode mixing (for example a low-rank residual) rather than simply increasing the
+DCT grid.
 
 ## Identifiability note
 
