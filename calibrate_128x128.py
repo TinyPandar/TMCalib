@@ -858,7 +858,7 @@ class DMDController:
         encode_chunk_size=32,
         progress_callback=None,
     ):
-        """Encode 128-grid TM rows in vectorized CPU/GPU chunks."""
+        """Encode aligned integer-macro-pixel TM rows in CPU/GPU chunks."""
         tm_rows = np.asarray(tm_rows)
         expected_input_count = self.dmd_height * self.dmd_width
         if tm_rows.ndim != 2 or tm_rows.shape[1] != expected_input_count:
@@ -888,7 +888,7 @@ class DMDController:
             ds_method == "mean"
             and n_sp * n_sp == combination_length
             and int(px) == n_sp
-            and self.pixel_group_size == n_sp
+            and self.pixel_group_size % n_sp == 0
             and self.dmd_height * self.pixel_group_size
             == self.active_height
             and self.dmd_width * self.pixel_group_size
@@ -967,8 +967,11 @@ class DMDController:
         )
         lut = np.asarray(lut)
         lut_zero = len(lut) // 2
+        repeats_per_input = self.pixel_group_size // n_sp
+        downsampled_height = self.dmd_height * repeats_per_input
+        downsampled_width = self.dmd_width * repeats_per_input
         row_shifts = (
-            n_sp * np.arange(self.dmd_height, dtype=np.intp)
+            n_sp * np.arange(downsampled_height, dtype=np.intp)
         ) % (n_sp**2)
         roll_indices = (
             np.arange(n_sp**2, dtype=np.intp)[None, :]
@@ -1002,9 +1005,14 @@ class DMDController:
                 ).astype(np.complex64, copy=False)
                 field_max = np.max(np.abs(fields), axis=(1, 2))
                 fields /= field_max[:, None, None]
-                downsampled = np.zeros_like(fields)
+                repeated = np.repeat(
+                    np.repeat(fields, repeats_per_input, axis=1),
+                    repeats_per_input,
+                    axis=2,
+                )
+                downsampled = np.zeros_like(repeated)
                 for _ in range(n_sp**2):
-                    downsampled += fields
+                    downsampled += repeated
                 downsampled /= n_sp**2
                 downsampled_max = np.max(
                     np.abs(downsampled), axis=(1, 2)
@@ -1027,8 +1035,8 @@ class DMDController:
                 active_holograms = (
                     rolled.reshape(
                         len(valid_local_indices),
-                        self.dmd_height,
-                        self.dmd_width,
+                        downsampled_height,
+                        downsampled_width,
                         n_sp,
                         n_sp,
                     )
@@ -1061,7 +1069,7 @@ class DMDController:
         progress_callback=None,
         device_index=0,
     ):
-        """CUDA encoder for the centred 512 x 512 active hologram."""
+        """CUDA encoder for aligned integer-macro-pixel holograms."""
         tm_rows = np.asarray(tm_rows)
         batch_count = int(tm_rows.shape[0])
         patterns = np.zeros(
@@ -1079,6 +1087,9 @@ class DMDController:
             )
         device = torch.device("cuda:{}".format(device_index))
         encode_chunk_size = max(1, int(encode_chunk_size))
+        repeats_per_input = self.pixel_group_size // n_sp
+        downsampled_height = self.dmd_height * repeats_per_input
+        downsampled_width = self.dmd_width * repeats_per_input
 
         tensor_cache = getattr(self, "_focus_gpu_tensor_cache", None)
         if tensor_cache is None:
@@ -1087,8 +1098,8 @@ class DMDController:
         cache_key = (
             device_index,
             int(n_sp),
-            self.dmd_height,
-            self.dmd_width,
+            downsampled_height,
+            downsampled_width,
         )
         cached = tensor_cache.get(cache_key)
         if cached is None:
@@ -1105,7 +1116,7 @@ class DMDController:
             row_shifts = (
                 n_sp
                 * torch.arange(
-                    self.dmd_height,
+                    downsampled_height,
                     device=device,
                     dtype=torch.long,
                 )
@@ -1162,9 +1173,19 @@ class DMDController:
                         torch.abs(fields), dim=(1, 2)
                     )
                     fields /= field_max[:, None, None]
-                    downsampled = torch.zeros_like(fields)
+                    repeated = torch.repeat_interleave(
+                        fields,
+                        repeats_per_input,
+                        dim=1,
+                    )
+                    repeated = torch.repeat_interleave(
+                        repeated,
+                        repeats_per_input,
+                        dim=2,
+                    )
+                    downsampled = torch.zeros_like(repeated)
                     for _ in range(n_sp**2):
-                        downsampled += fields
+                        downsampled += repeated
                     downsampled /= n_sp**2
                     downsampled_max = torch.amax(
                         torch.abs(downsampled), dim=(1, 2)
@@ -1185,8 +1206,8 @@ class DMDController:
                     ]
                     expanded_roll_indices = roll_indices.expand(
                         len(valid_local_indices),
-                        self.dmd_height,
-                        self.dmd_width,
+                        downsampled_height,
+                        downsampled_width,
                         n_sp**2,
                     )
                     rolled = torch.gather(
@@ -1195,8 +1216,8 @@ class DMDController:
                     active_holograms = (
                         rolled.reshape(
                             len(valid_local_indices),
-                            self.dmd_height,
-                            self.dmd_width,
+                            downsampled_height,
+                            downsampled_width,
                             n_sp,
                             n_sp,
                         )

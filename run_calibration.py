@@ -7,6 +7,7 @@ import importlib
 PROFILE_MODULES = {
     "v4_32x24": "calibrate_v4_32x24",
     "v4_32x24_cholesky": "calibrate_v4_32x24_cholesky",
+    "fourfold_128x96": "calibrate_128x96",
     "fivefold_160x120": "calibrate_160x120",
     "dense_128x128": "calibrate_128x128",
     "dense_128x128_roi26": "calibrate_128x128_26x26",

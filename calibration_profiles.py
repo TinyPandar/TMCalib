@@ -28,6 +28,14 @@ PROFILES = {
         active_shape=(768, 1024),
         capabilities=frozenset({"full_tm", "remote_reconstruction"}),
     ),
+    "fourfold_128x96": CalibrationProfile(
+        name="fourfold_128x96",
+        input_shape=(96, 128),
+        camera_roi=(128, 128),
+        input_macro_pixel_size=8,
+        active_shape=(768, 1024),
+        capabilities=frozenset({"full_tm", "one_click"}),
+    ),
     "fivefold_160x120": CalibrationProfile(
         name="fivefold_160x120",
         input_shape=(120, 160),

@@ -5,6 +5,7 @@ from calibration_profiles import (
     channelized_filename,
     normalize_polarization_channel,
 )
+from run_calibration import PROFILE_MODULES
 
 
 class CalibrationProfileTests(unittest.TestCase):
@@ -12,6 +13,16 @@ class CalibrationProfileTests(unittest.TestCase):
         self.assertEqual(PROFILES["v4_32x24"].input_shape, (24, 32))
         self.assertEqual(PROFILES["dense_128x128"].camera_roi, (128, 128))
         self.assertEqual(PROFILES["dense_128x128_roi26"].camera_roi, (26, 26))
+
+        fourfold = PROFILES["fourfold_128x96"]
+        self.assertEqual(fourfold.input_shape, (96, 128))
+        self.assertEqual(fourfold.camera_roi, (128, 128))
+        self.assertEqual(fourfold.input_macro_pixel_size, 8)
+        self.assertEqual(fourfold.active_shape, (768, 1024))
+        self.assertEqual(
+            PROFILE_MODULES["fourfold_128x96"],
+            "calibrate_128x96",
+        )
 
         fivefold = PROFILES["fivefold_160x120"]
         self.assertEqual(fivefold.input_shape, (120, 160))

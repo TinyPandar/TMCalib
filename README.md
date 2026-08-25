@@ -10,6 +10,7 @@
 | --- | --- | --- | --- | --- |
 | `v4_32x24` | 32×24 | 1024×768 | 128×128 | 原 v4 粗网格程序 |
 | `v4_32x24_cholesky` | 32×24 | 1024×768 | 128×128 | v4 的 Cholesky 重建入口 |
+| `fourfold_128x96` | 128×96 | 1024×768 | 128×128 | 4 倍逻辑场以 8×8 宏像素、4×4 `holo_SP` 编码铺满 DMD |
 | `fivefold_160x120` | 160×120 | 1024×768 | 128×128 | 5 倍逻辑场先扩展为 256×192 超像素网格，再以 4×4 编码铺满 DMD |
 | `dense_128x128` | 128×128 | 中央 512×512 | 128×128 | 稠密输入程序 |
 | `dense_128x128_roi26` | 128×128 | 中央 512×512 | 26×26 | I0/I90 可选偏振通道 |
@@ -22,10 +23,12 @@
 tmcalib-repo/
 ├── run_calibration.py                 # 统一启动器
 ├── calibrate_v4_32x24.py              # 32×24 主程序
+├── calibrate_128x96.py                # 128×96→128×128、全 DMD 主程序
 ├── calibrate_160x120.py               # 160×120→128×128、全 DMD 主程序
 ├── calibrate_128x128.py               # 128×128→128×128 主程序
 ├── calibrate_128x128_26x26.py         # 128×128→26×26，I0/I90 共用
 ├── calibration_profiles.py            # Profile 与偏振通道定义
+├── dmd_pattern_128x96.py              # 128×96→256×192 SP→全 DMD 映射
 ├── dmd_pattern_160x120.py             # 160×120→256×192 SP→全 DMD 映射
 ├── dmd_pattern_128.py                 # 中央 512×512 DMD 映射
 ├── tm_reconstruction_128.py           # 通用分块 GGS2-1 重建器
@@ -63,6 +66,9 @@ pip install -r requirements.txt
 # 原 v4：32×24 输入
 python run_calibration.py --profile v4_32x24
 
+# 4 倍：128×96 输入按 8×8 宏像素铺满 DMD，128×128 相机输出
+python run_calibration.py --profile fourfold_128x96
+
 # 5 倍：160×120 输入扩展后铺满 DMD，128×128 相机输出
 python run_calibration.py --profile fivefold_160x120
 
@@ -77,6 +83,19 @@ python run_calibration.py --profile dense_128x128_roi26 --channel I90
 ```
 
 程序会直接控制实验硬件。启动 GUI 前应确认 DMD、相机、触发线、曝光和光路功率处于安全状态。
+
+## 4 倍数据生成
+
+128×96 输入共有 12,288 个自由度，默认 8N 数据集包含 98,304 个随机 16 级相位 Probe。每个逻辑输入沿两个方向各重复到 2 个光学超像素，再以 4×4 `holo_SP` 编码，因此每个输入对应一个对齐的 8×8 DMD 宏像素：
+
+```powershell
+python -m tools.generate_probe_samples_128x96_8n --output-dir pregenerated_patterns_128x96_fill_8N_full
+
+# 中断后从 generation_progress.json 继续
+python -m tools.generate_probe_samples_128x96_8n --output-dir pregenerated_patterns_128x96_fill_8N_full --resume
+```
+
+完整 Probe + Pattern 恰好为 81 GiB。生成器会预检磁盘空间并分批写入 `.npy` memmap；完整 1024×768 DMD 区域均参与编码，没有外围 zero padding。
 
 ## 5 倍数据生成
 
@@ -98,6 +117,7 @@ python -m tools.generate_probe_samples_160x120_8n --output-dir pregenerated_patt
 ```text
 JUOPT_DLP V4.0.002 20250522 release/4.DLL/DLL/JUOPT_DLL_V4.dll
 pregenerated_patterns_8N/
+pregenerated_patterns_128x96_fill_8N_full/
 pregenerated_patterns_160x120_fill_8N_full/
 pregenerated_patterns_128_px4_active512_8N_full/
 ```
@@ -109,6 +129,7 @@ pregenerated_patterns_128_px4_active512_8N_full/
 分析工具以模块方式从仓库根目录运行：
 
 ```powershell
+python -m tools.generate_probe_samples_128x96_8n --help
 python -m tools.generate_probe_samples_160x120_8n --help
 python -m tools.generate_probe_samples_128 --help
 python -m tools.analyze_full_measurements_128 --help
@@ -126,6 +147,7 @@ python -m unittest discover -s tests -v
 ## 代码状态
 
 - 相机、JUOPT DMD 和 GUI 仍来自经过实验使用的单文件程序，以降低第一次仓库化对硬件行为的影响。
+- 128×96 Profile 使用对齐的 8×8 宏像素，复用 128×128 相机采集、低显存重建和整数倍 GPU 聚焦编码流程。
 - 160×120 Profile 复用已验证的 128×128 相机采集顺序，仅替换输入维度、数据契约和 DMD 编码策略。
 - 26×26 的 I0/I90 已参数化，并统一使用最新版可配置重建器。
 - 下一步重构应逐步抽取公共相机、DMD 和采集类，并用模拟硬件测试保护行为；不要一次性重写硬件控制链。
