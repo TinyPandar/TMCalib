@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Tuple
 
@@ -111,6 +112,41 @@ def _flatten_samples(array: np.ndarray) -> np.ndarray:
     return array.reshape(array.shape[0], -1)
 
 
+def _load_measurements(path: str, sample_count: int) -> Tuple[np.ndarray, str]:
+    """Load either an NPY array or TMCalib's headerless uint16 memmap."""
+    if sample_count <= 0:
+        raise ValueError("measurement sample count must be positive")
+
+    with open(path, "rb") as stream:
+        magic = stream.read(len(np.lib.format.MAGIC_PREFIX))
+        is_npy = magic == np.lib.format.MAGIC_PREFIX
+
+    if is_npy:
+        return np.load(path, mmap_mode="r", allow_pickle=False), "NPY"
+
+    itemsize = np.dtype(np.uint16).itemsize
+    row_bytes = sample_count * itemsize
+    file_size = os.path.getsize(path)
+    if file_size == 0 or file_size % row_bytes != 0:
+        raise ValueError(
+            "measurement file is not NPY and its size ({}) is incompatible "
+            "with a headerless uint16 memmap containing {} samples".format(
+                file_size, sample_count
+            )
+        )
+
+    output_count = file_size // row_bytes
+    return (
+        np.memmap(
+            path,
+            dtype=np.uint16,
+            mode="r",
+            shape=(sample_count, output_count),
+        ),
+        "headerless uint16 memmap",
+    )
+
+
 def _load_tm_subset(
     tm_path: str,
     n_input: int,
@@ -147,7 +183,9 @@ def main() -> None:
     expected_output = int(profile.camera_roi[0] * profile.camera_roi[1])
 
     probes_mm = np.load(args.probes, mmap_mode="r")
-    measurements_mm = np.load(args.measurements, mmap_mode="r")
+    measurements_mm, measurement_format = _load_measurements(
+        args.measurements, int(probes_mm.shape[0])
+    )
     if probes_mm.shape[0] != measurements_mm.shape[0]:
         raise ValueError(
             "probe/measurement sample counts differ: {} vs {}".format(
@@ -197,6 +235,7 @@ def main() -> None:
     print("TM correction setup")
     print("  profile: {}".format(args.profile))
     print("  input shape: {} (N={})".format(input_shape, n_input))
+    print("  measurement format: {}".format(measurement_format))
     print(
         "  calibration probes: {} / {}".format(
             len(sample_indices), probes_mm.shape[0]

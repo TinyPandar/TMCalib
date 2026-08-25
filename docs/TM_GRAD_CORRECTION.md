@@ -48,11 +48,13 @@ well described by a low-dimensional input calibration field.
 
 ## Required data
 
-You need three `.npy` files with matching sample order:
+You need three array files with matching sample order:
 
 1. reconstructed complex TM
 2. complex input probes
-3. real measured camera intensities for those probes
+3. real measured camera intensities for those probes; this may be either a
+   standard `.npy` array or TMCalib's headerless `uint16` measurement memmap
+   (commonly named `measurements_memmap.npy` despite having no NPY header)
 
 For `v4_32x24`:
 

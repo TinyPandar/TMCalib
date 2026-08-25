@@ -1,4 +1,6 @@
 import math
+import os
+import tempfile
 import unittest
 
 import numpy as np
@@ -9,6 +11,7 @@ except ImportError:  # pragma: no cover - measurement environment installs torch
     torch = None
 
 if torch is not None:
+    from tools.run_tm_grad_correction import _load_measurements
     from tm_grad_correction import (
         build_dct2_basis,
         fit_input_dct_correction,
@@ -17,6 +20,44 @@ if torch is not None:
 
 @unittest.skipIf(torch is None, "PyTorch is installed separately from requirements.txt")
 class TMGradCorrectionTests(unittest.TestCase):
+    def test_loads_headerless_uint16_measurement_memmap(self):
+        expected = np.arange(24, dtype=np.uint16).reshape(4, 6)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "measurements_memmap.npy")
+            raw = np.memmap(
+                path, dtype=np.uint16, mode="w+", shape=expected.shape
+            )
+            raw[:] = expected
+            raw.flush()
+            del raw
+
+            actual, storage_format = _load_measurements(path, sample_count=4)
+
+            self.assertEqual(storage_format, "headerless uint16 memmap")
+            np.testing.assert_array_equal(actual, expected)
+            del actual
+
+    def test_loads_standard_npy_measurements(self):
+        expected = np.arange(24, dtype=np.float32).reshape(4, 6)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "measurements.npy")
+            np.save(path, expected)
+
+            actual, storage_format = _load_measurements(path, sample_count=4)
+
+            self.assertEqual(storage_format, "NPY")
+            np.testing.assert_array_equal(actual, expected)
+            del actual
+
+    def test_rejects_incompatible_headerless_measurement_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "measurements_memmap.npy")
+            with open(path, "wb") as stream:
+                stream.write(b"bad-size")
+
+            with self.assertRaisesRegex(ValueError, "incompatible"):
+                _load_measurements(path, sample_count=3)
+
     def test_dct_basis_excludes_dc(self):
         basis = build_dct2_basis((4, 5), (3, 2), exclude_dc=True)
         self.assertEqual(tuple(basis.shape), (5, 20))
