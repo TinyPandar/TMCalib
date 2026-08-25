@@ -849,6 +849,43 @@ class DMDController:
             raise ValueError("TM row contains NaN or infinity")
         return np.exp(-1j * np.angle(field)).astype(np.complex64, copy=False)
 
+    @staticmethod
+    def _target_and_background_intensities(
+        captured_image,
+        target_x,
+        target_y,
+    ):
+        """Return the 3x3 target maximum and mean outside that region."""
+        captured_image = np.asarray(captured_image)
+        if captured_image.ndim != 2:
+            raise ValueError("Focus intensity analysis requires a 2-D image")
+
+        image_h, image_w = captured_image.shape
+        target_x = int(target_x)
+        target_y = int(target_y)
+        if not 0 <= target_x < image_w or not 0 <= target_y < image_h:
+            raise ValueError(
+                "Target ({}, {}) is outside image {}x{}".format(
+                    target_x, target_y, image_w, image_h
+                )
+            )
+
+        y0 = max(0, target_y - 1)
+        y1 = min(image_h, target_y + 2)
+        x0 = max(0, target_x - 1)
+        x1 = min(image_w, target_x + 2)
+        target_intensity = float(np.max(captured_image[y0:y1, x0:x1]))
+
+        background_mask = np.ones(captured_image.shape, dtype=bool)
+        background_mask[y0:y1, x0:x1] = False
+        background_pixels = captured_image[background_mask]
+        background_intensity = (
+            float(np.mean(background_pixels))
+            if background_pixels.size
+            else float(np.mean(captured_image))
+        )
+        return target_intensity, background_intensity
+
     def _build_focus_hologram_batch(
         self,
         tm_rows,
@@ -2804,25 +2841,20 @@ class DMDController:
 
             target_x = int(target_x)
             target_y = int(target_y)
-            target_intensity = float(captured_image[target_y, target_x])
+            (
+                target_intensity,
+                background_intensity,
+            ) = self._target_and_background_intensities(
+                captured_image,
+                target_x,
+                target_y,
+            )
             peak_flat_index = int(np.argmax(captured_image))
             peak_y, peak_x = np.unravel_index(
                 peak_flat_index, captured_image.shape
             )
             peak_intensity = float(captured_image[peak_y, peak_x])
 
-            # Estimate the speckle background outside a 5x5 box around the
-            # requested focus. The reported PBR is target/background, so a
-            # bright peak elsewhere cannot masquerade as successful focusing.
-            background_mask = np.ones(captured_image.shape, dtype=bool)
-            y0 = max(0, target_y - 2)
-            y1 = min(roi_h, target_y + 3)
-            x0 = max(0, target_x - 2)
-            x1 = min(roi_w, target_x + 3)
-            background_mask[y0:y1, x0:x1] = False
-            background_intensity = float(
-                np.mean(captured_image[background_mask])
-            )
             mean_intensity = float(np.mean(captured_image))
             pbr = (
                 target_intensity / background_intensity
@@ -2994,7 +3026,14 @@ class DMDController:
                 )
             )
 
-        target_intensity = float(captured_image[target_y, target_x])
+        (
+            target_intensity,
+            background_intensity,
+        ) = self._target_and_background_intensities(
+            captured_image,
+            target_x,
+            target_y,
+        )
         peak_flat_index = int(np.argmax(captured_image))
         peak_y, peak_x = np.unravel_index(
             peak_flat_index, captured_image.shape
@@ -3005,17 +3044,6 @@ class DMDController:
         image_intensity_range = image_max_intensity - image_min_intensity
         peak_distance = float(
             math.hypot(int(peak_x) - target_x, int(peak_y) - target_y)
-        )
-        background_mask = np.ones(captured_image.shape, dtype=bool)
-        background_mask[
-            max(0, target_y - 2):min(roi_h, target_y + 3),
-            max(0, target_x - 2):min(roi_w, target_x + 3),
-        ] = False
-        background_pixels = captured_image[background_mask]
-        background_intensity = (
-            float(np.mean(background_pixels))
-            if background_pixels.size
-            else float(np.mean(captured_image))
         )
         pbr = (
             target_intensity / background_intensity
@@ -3186,7 +3214,14 @@ class DMDController:
                     )
                 )
 
-            target_intensity = float(captured_image[target_y, target_x])
+            (
+                target_intensity,
+                background_intensity,
+            ) = self._target_and_background_intensities(
+                captured_image,
+                target_x,
+                target_y,
+            )
             peak_flat_index = int(np.argmax(captured_image))
             peak_y, peak_x = np.unravel_index(
                 peak_flat_index, captured_image.shape
@@ -3197,14 +3232,6 @@ class DMDController:
             image_intensity_range = image_max_intensity - image_min_intensity
             peak_distance = float(
                 math.hypot(int(peak_x) - target_x, int(peak_y) - target_y)
-            )
-            background_mask = np.ones(captured_image.shape, dtype=bool)
-            background_mask[
-                max(0, target_y - 2) : min(roi_h, target_y + 3),
-                max(0, target_x - 2) : min(roi_w, target_x + 3),
-            ] = False
-            background_intensity = float(
-                np.mean(captured_image[background_mask])
             )
             pbr = (
                 target_intensity / background_intensity

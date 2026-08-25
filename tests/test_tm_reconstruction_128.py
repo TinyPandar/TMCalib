@@ -130,7 +130,81 @@ class TMReconstructionTests(unittest.TestCase):
         self.assertEqual(points[128], (0, 1))
         self.assertEqual(points[-1], (127, 127))
 
-    def test_pixelwise_capture_uses_target_intensity_and_peak_position(self):
+    def test_pixelwise_capture_uses_three_by_three_target_max(self):
+        class FakeCamera:
+            roi_width = 8
+            roi_height = 8
+
+            def __init__(self):
+                self.started = False
+
+            def start(self):
+                self.started = True
+
+            def stop(self):
+                self.started = False
+
+            def run(self):
+                image = np.full((8, 8), 10, dtype=np.uint16)
+                image[4, 3] = 100
+                image[4, 5] = 50
+                return image, 0.0, 0.0
+
+        class FakeDMD:
+            def juoptProjection(self, *_):
+                return 0
+
+            def juoptStop(self, *_):
+                return 0
+
+        controller = DMDController.__new__(DMDController)
+        controller.camera = FakeCamera()
+        controller.DMD = FakeDMD()
+        controller.dev_id = 0
+        controller.dmd_height = 4
+        controller.dmd_width = 4
+        controller.load_pattern = lambda _: True
+        controller.clear_sequence = lambda _: None
+        controller._input_field_to_dmd_pattern = (
+            lambda field, **_: np.zeros((8, 8), dtype=np.uint8)
+        )
+        result = controller._capture_focus_for_tm_row(
+            np.ones(16, dtype=np.complex64),
+            target_x=3,
+            target_y=4,
+        )
+        self.assertTrue(result["success"], result["error"])
+        expected_background = 590.0 / 55.0
+        self.assertEqual(result["target_intensity"], 100.0)
+        self.assertAlmostEqual(
+            result["background_intensity"], expected_background
+        )
+        self.assertEqual(result["peak_position"], (3, 4))
+        self.assertEqual(result["peak_distance_px"], 0.0)
+        self.assertAlmostEqual(result["pbr"], 100.0 / expected_background)
+        self.assertFalse(controller.camera.started)
+
+    def test_focus_analysis_uses_target_max_and_excludes_exact_region_at_edge(self):
+        class FakeCamera:
+            roi_width = 8
+            roi_height = 8
+
+        controller = DMDController.__new__(DMDController)
+        controller.camera = FakeCamera()
+        image = np.full((8, 8), 10, dtype=np.uint16)
+        image[0, 0] = 100
+        image[2, 2] = 50
+
+        result = controller._analyze_pixelwise_focus_image(image, 0, 0)
+
+        expected_background = 640.0 / 60.0
+        self.assertEqual(result["target_intensity"], 100.0)
+        self.assertAlmostEqual(
+            result["background_intensity"], expected_background
+        )
+        self.assertAlmostEqual(result["pbr"], 100.0 / expected_background)
+
+    def test_partial_tm_focus_uses_three_by_three_target_max(self):
         class FakeCamera:
             roi_width = 8
             roi_height = 8
@@ -160,23 +234,25 @@ class TMReconstructionTests(unittest.TestCase):
         controller.camera = FakeCamera()
         controller.DMD = FakeDMD()
         controller.dev_id = 0
-        controller.dmd_height = 4
-        controller.dmd_width = 4
+        controller.dmd_height = 2
+        controller.dmd_width = 2
         controller.load_pattern = lambda _: True
         controller.clear_sequence = lambda _: None
         controller._input_field_to_dmd_pattern = (
             lambda field, **_: np.zeros((8, 8), dtype=np.uint8)
         )
-        result = controller._capture_focus_for_tm_row(
-            np.ones(16, dtype=np.complex64),
-            target_x=3,
-            target_y=4,
-        )
+
+        mapping = {"target_index": 35, "partial_row_index": 0}
+        with patch(
+            "calibrate_128x128.load_partial_tm_row",
+            return_value=(np.ones(4, dtype=np.complex64), mapping),
+        ), patch("calibrate_128x128.time.sleep"):
+            result = controller.conjugate_focus_with_partial_tm(3, 4)
+
         self.assertTrue(result["success"], result["error"])
         self.assertEqual(result["target_intensity"], 100.0)
-        self.assertEqual(result["peak_position"], (3, 4))
-        self.assertEqual(result["peak_distance_px"], 0.0)
-        self.assertAlmostEqual(result["pbr"], 10.0)
+        self.assertEqual(result["background_intensity"], 10.0)
+        self.assertEqual(result["pbr"], 10.0)
         self.assertFalse(controller.camera.started)
 
     def test_pixelwise_scan_publishes_each_successful_camera_frame(self):
