@@ -87,3 +87,4 @@ desktop.ini
 
 # Notebook transient state
 .ipynb_checkpoints/
+.vscode/settings.json

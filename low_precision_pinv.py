@@ -185,6 +185,45 @@ class PlanarComplexHalfMatrix:
             result_imag.mul_(scale)
         return torch.complex(result_real, result_imag)
 
+    def adjoint_matmul(
+        self,
+        right: torch.Tensor,
+        normalize_rhs: bool = True,
+    ) -> torch.Tensor:
+        """Return ``this_matrix.H @ right`` as complex64.
+
+        This is the low-memory counterpart of :meth:`matmul`.  It lets the
+        Cholesky GGS path keep a large probe matrix in two FP16 planes while
+        retaining the complex64 factor and phase-retrieval state.
+        """
+        rows, columns = self.shape
+        if right.ndim != 2 or int(right.shape[0]) != rows:
+            raise ValueError("right must have shape ({}, block_width)".format(rows))
+        if right.dtype != torch.complex64 or right.device != self.device:
+            raise ValueError("right must be CUDA complex64 on {}".format(self.device))
+
+        if normalize_rhs:
+            scale = torch.maximum(
+                torch.amax(torch.abs(right.real), dim=0, keepdim=True),
+                torch.amax(torch.abs(right.imag), dim=0, keepdim=True),
+            ).clamp_min_(1.0)
+            right_real = (right.real / scale).to(torch.float16)
+            right_imag = (right.imag / scale).to(torch.float16)
+        else:
+            scale = None
+            right_real = right.real.to(torch.float16)
+            right_imag = right.imag.to(torch.float16)
+
+        matrix_real, matrix_imag = self._logical_planes()
+        result_real = torch.mm(matrix_real.mT, right_real).float()
+        result_real.add_(torch.mm(matrix_imag.mT, right_imag).float())
+        result_imag = torch.mm(matrix_real.mT, right_imag).float()
+        result_imag.sub_(torch.mm(matrix_imag.mT, right_real).float())
+        if scale is not None:
+            result_real.mul_(scale)
+            result_imag.mul_(scale)
+        return torch.complex(result_real, result_imag)
+
 
 def load_planar_complex_half(
     real_path: str,

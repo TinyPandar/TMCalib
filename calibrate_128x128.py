@@ -70,7 +70,8 @@ warnings.filterwarnings('ignore')
 # period so every hardware trigger can start a new exposure.
 TARGET_ACQUISITION_FPS = 500.0
 DMD_PICTURE_TIME_US = 1_000_000.0 / TARGET_ACQUISITION_FPS
-CAMERA_EXPOSURE_US = 1500.0
+# CAMERA_EXPOSURE_US = 1500.0
+CAMERA_EXPOSURE_US = 60.0
 
 # Full-calibration dataset selection for the 128 x 128 input grid. Change only
 # ``active`` to switch between the retained 4N data and the new 8N data.
@@ -737,6 +738,9 @@ class DMDController:
         self.ggs21_output_chunk_size = self.full_pattern_config[
             "reconstruction_output_chunk_size"
         ]
+        self.ggs21_probe_storage = self.full_pattern_config.get(
+            "reconstruction_probe_storage", "complex64"
+        )
         self.ggs21_use_gpu = True
         # Pixel-wise hologram encoding prefers the first CUDA device and
         # automatically falls back to the bit-exact NumPy implementation.
@@ -1996,6 +2000,7 @@ class DMDController:
                 iterations=int(self.ggs21_iters),
                 gs2_ratio=float(self.ggs21_ratio),
                 output_chunk_size=int(self.ggs21_output_chunk_size),
+                probe_storage=str(self.ggs21_probe_storage),
                 ridge=float(self.ggs21_ridge),
                 solver=str(self.ggs21_solver),
                 device=(
