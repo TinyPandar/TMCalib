@@ -70,7 +70,8 @@ warnings.filterwarnings('ignore')
 # period so every hardware trigger can start a new exposure.
 TARGET_ACQUISITION_FPS = 500.0
 DMD_PICTURE_TIME_US = 1_000_000.0 / TARGET_ACQUISITION_FPS
-CAMERA_EXPOSURE_US = 1500.0
+# CAMERA_EXPOSURE_US = 1500.0
+CAMERA_EXPOSURE_US = 60.0
 
 # Full-calibration dataset selection for the 128 x 128 input grid. Change only
 # ``active`` to switch between the retained 4N data and the new 8N data.
@@ -737,6 +738,9 @@ class DMDController:
         self.ggs21_output_chunk_size = self.full_pattern_config[
             "reconstruction_output_chunk_size"
         ]
+        self.ggs21_probe_storage = self.full_pattern_config.get(
+            "reconstruction_probe_storage", "complex64"
+        )
         self.ggs21_use_gpu = True
         # Pixel-wise hologram encoding prefers the first CUDA device and
         # automatically falls back to the bit-exact NumPy implementation.
@@ -1717,7 +1721,7 @@ class DMDController:
         ):
             if not self.test_mode:
                 raise FileNotFoundError(
-                    "Full 128 x 128 probe data are not present. Generate them "
+                    f"Full {N_x} x {N_y} probe data are not present. Generate them "
                     "with a streaming/full-calibration workflow first."
                 )
             print("Pre-generated optical-test data missing; generating them now...")
@@ -1729,7 +1733,7 @@ class DMDController:
             )
 
         print("\n" + "=" * 70)
-        print("Loading pre-generated 128 x 128 patterns...")
+        print(f"Loading pre-generated {N_x} x {N_y} patterns...")
         print("=" * 70)
         P = np.load(probe_file, mmap_mode="r")
         full_patterns = np.load(pattern_file, mmap_mode="r")
@@ -1744,7 +1748,9 @@ class DMDController:
             "active_shape": [self.active_height, self.active_width],
             "active_offset_xy": [self.active_x, self.active_y],
             "dmd_shape": [self.original_height, self.original_width],
-            "mapping_version": "aligned_active512_v1",
+            "mapping_version": self.full_pattern_config.get(
+                "mapping_version", "aligned_active512_v1"
+            ),
             "reconstruction_ready": False if self.test_mode else True,
         }
         for key, expected_value in expected_metadata.items():
@@ -1994,6 +2000,7 @@ class DMDController:
                 iterations=int(self.ggs21_iters),
                 gs2_ratio=float(self.ggs21_ratio),
                 output_chunk_size=int(self.ggs21_output_chunk_size),
+                probe_storage=str(self.ggs21_probe_storage),
                 ridge=float(self.ggs21_ridge),
                 solver=str(self.ggs21_solver),
                 device=(
@@ -4650,7 +4657,7 @@ class Application(tk.Tk):
                 self.after(
                     0,
                     lambda: self.log(
-                        "[1/4] Measuring all 65,536 probe patterns..."
+                        f"[1/4] Measuring all {controller.full_probe_count:,} probe patterns..."
                     ),
                 )
                 controller.measure_progress_callback = measurement_progress

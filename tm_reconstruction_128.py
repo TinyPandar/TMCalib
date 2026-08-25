@@ -57,6 +57,7 @@ class ReconstructionConfig:
     probe_transfer_rows: int = 128
     low_precision_transfer_rows: int = 256
     adjoint_row_chunk: int = 2048
+    probe_storage: str = "complex64"
     ridge: float = 1e-4
     solver: str = "cholesky"
     device: str = "auto"
@@ -142,6 +143,15 @@ def _validate_config(config: ReconstructionConfig) -> Tuple[np.ndarray, int, int
     if config.solver not in ("cholesky", "complex32_pinv", "adjoint"):
         raise ValueError(
             "solver must be 'cholesky', 'complex32_pinv', or 'adjoint'"
+        )
+    if config.probe_storage not in ("complex64", "planar_complex32"):
+        raise ValueError(
+            "probe_storage must be 'complex64' or 'planar_complex32'"
+        )
+    if config.probe_storage == "planar_complex32" and config.solver != "cholesky":
+        raise ValueError(
+            "planar_complex32 probe storage is currently supported only by "
+            "the cholesky solver"
         )
     if not os.path.isfile(config.probe_path):
         raise FileNotFoundError("Probe file not found: {}".format(config.probe_path))
@@ -320,6 +330,82 @@ def _get_cholesky_factor(
     return factor
 
 
+def _get_streaming_cholesky_factor(
+    probe_matrix: np.ndarray,
+    config: ReconstructionConfig,
+    device: torch.device,
+    progress: Optional[ProgressCallback] = None,
+) -> torch.Tensor:
+    """Load or build the factor without placing the full complex64 X on CUDA.
+
+    The Gram matrix is accumulated from probe-row blocks.  This setup path is
+    used with planar-complex32 probe storage: on the 160 x 120 / 8N profile it
+    avoids the otherwise unavoidable 21.97 GiB X plus 2.75 GiB Gram peak.
+    """
+    measurement_count, input_count = map(int, probe_matrix.shape)
+    if _cholesky_cache_matches(config, input_count):
+        if progress:
+            progress(4.0, "Loading cached probe Cholesky factor")
+        cached = np.load(config.cholesky_cache_path, mmap_mode="r")
+        return _copy_numpy_matrix_to_device(cached, device)
+
+    if progress:
+        progress(4.0, "Building probe Gram matrix in low-memory row blocks")
+    previous_tf32 = None
+    if device.type == "cuda":
+        previous_tf32 = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = False
+    gram = torch.zeros(
+        (input_count, input_count), dtype=torch.complex64, device=device
+    )
+    scale = 1.0 / math.sqrt(float(measurement_count))
+    row_chunk = int(config.adjoint_row_chunk)
+    try:
+        for start in range(0, measurement_count, row_chunk):
+            stop = min(start + row_chunk, measurement_count)
+            host = np.array(
+                probe_matrix[start:stop], dtype=np.complex64, copy=True
+            )
+            block = torch.from_numpy(host).to(device=device)
+            block.mul_(scale)
+            # addmm_ writes directly into the Gram accumulator instead of
+            # materializing another input_count x input_count CUDA tensor.
+            gram.addmm_(block.mH, block)
+            del host, block
+            if progress and (start == 0 or stop == measurement_count):
+                progress(
+                    4.0 + 2.0 * stop / measurement_count,
+                    "Probe Gram matrix: {}/{} rows".format(
+                        stop, measurement_count
+                    ),
+                )
+        gram.diagonal().add_(float(config.ridge))
+        if progress:
+            progress(6.0, "Computing probe Cholesky factor (one-time step)")
+        factor = torch.linalg.cholesky(gram)
+        del gram
+    finally:
+        if previous_tf32 is not None:
+            torch.backends.cuda.matmul.allow_tf32 = previous_tf32
+
+    cache_dir = os.path.dirname(os.path.abspath(config.cholesky_cache_path))
+    os.makedirs(cache_dir, exist_ok=True)
+    _save_device_matrix(config.cholesky_cache_path, factor)
+    _write_json_atomic(
+        _cache_metadata_path(config.cholesky_cache_path),
+        {
+            "probe": _file_identity(config.probe_path),
+            "shape": [input_count, input_count],
+            "dtype": "complex64",
+            "ridge": float(config.ridge),
+            "normalization": "X/sqrt(M)",
+            "gram_tf32": False,
+            "construction": "streaming_probe_rows",
+        },
+    )
+    return factor
+
+
 def ggs21_block(
     x: Union[torch.Tensor, PlanarComplexHalfMatrix],
     amplitude: torch.Tensor,
@@ -387,6 +473,9 @@ def ggs21_block(
             h_t = low_precision_pinv.matmul(
                 estimate_at_detector, normalize_rhs=False
             )
+        elif isinstance(x, PlanarComplexHalfMatrix):
+            rhs = x.adjoint_matmul(estimate_at_detector)
+            h_t = torch.cholesky_solve(rhs, cholesky_factor)
         else:
             # Resolving x.mH in one large CUDA matmul can materialize an 8 GiB
             # conjugated copy of the full probe matrix. Accumulating by probe
@@ -473,6 +562,7 @@ def _reconstruction_identity(
         "selected_range": [selection_start, selection_stop],
         "iterations": config.iterations,
         "solver": config.solver,
+        "probe_storage": config.probe_storage,
         "ridge": config.ridge,
         "measurement_preprocessing": {
             "dark_level": config.dark_level,
@@ -544,6 +634,27 @@ def reconstruct_tm(
         def show_probe_load(percent: float, message: str) -> None:
             if progress:
                 progress(4.0 + 0.03 * percent, message)
+
+        x = load_complex_numpy_as_planar_half(
+            probe_matrix,
+            device=device,
+            row_chunk=config.low_precision_transfer_rows,
+            scale=1.0 / math.sqrt(float(measurement_count)),
+            progress=show_probe_load,
+        )
+    elif config.probe_storage == "planar_complex32":
+        if device.type != "cuda":
+            raise RuntimeError("planar_complex32 probe storage requires CUDA")
+        factor = _get_streaming_cholesky_factor(
+            probe_matrix, config, device, progress=progress
+        )
+        # The streaming factor build releases its Gram matrix before the two
+        # half-precision probe planes are allocated.
+        torch.cuda.empty_cache()
+
+        def show_probe_load(percent: float, message: str) -> None:
+            if progress:
+                progress(6.0 + 0.01 * percent, message)
 
         x = load_complex_numpy_as_planar_half(
             probe_matrix,
@@ -764,7 +875,7 @@ def reconstruct_tm(
             "probe_storage": "complex64",
             "probe_compute": (
                 "planar torch.float16"
-                if config.solver == "complex32_pinv"
+                if isinstance(x, PlanarComplexHalfMatrix)
                 else "torch.complex64"
             ),
             "phase_retrieval_complex": "torch.complex64",

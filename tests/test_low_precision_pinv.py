@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -54,6 +55,132 @@ class LowPrecisionPinvTests(unittest.TestCase):
         expected = matrix @ right
         relative_error = torch.linalg.vector_norm(actual - expected) / torch.linalg.vector_norm(expected)
         self.assertLess(float(relative_error), 8e-4)
+
+    def test_planar_half_adjoint_matmul_matches_complex64(self):
+        matrix = self.random_complex((128, 96))
+        right = self.random_complex((128, 11))
+        operator = PlanarComplexHalfMatrix.from_complex(matrix)
+        actual = operator.adjoint_matmul(right)
+        expected = matrix.mH @ right
+        relative_error = (
+            torch.linalg.vector_norm(actual - expected)
+            / torch.linalg.vector_norm(expected)
+        )
+        self.assertLess(float(relative_error), 8e-4)
+
+    def test_planar_half_probe_supports_cholesky_ggs(self):
+        measurement_count = 192
+        input_count = 32
+        output_count = 4
+        phase = torch.randint(
+            0,
+            16,
+            (measurement_count, input_count),
+            device=self.device,
+            generator=self.generator,
+        )
+        x = torch.exp(1j * phase.float() * torch.pi / 8).to(torch.complex64)
+        x /= np.sqrt(measurement_count)
+        true_h = self.random_complex((input_count, output_count))
+        amplitude = torch.abs(x @ true_h)
+        gram = x.mH @ x
+        gram.diagonal().add_(1e-4)
+        factor = torch.linalg.cholesky(gram)
+
+        reference, reference_errors = ggs21_block(
+            x,
+            amplitude,
+            iterations=30,
+            gs2_ratio=0.75,
+            solver="cholesky",
+            cholesky_factor=factor,
+            random_seed=31,
+        )
+        actual, actual_errors = ggs21_block(
+            PlanarComplexHalfMatrix.from_complex(x),
+            amplitude,
+            iterations=30,
+            gs2_ratio=0.75,
+            solver="cholesky",
+            cholesky_factor=factor,
+            random_seed=31,
+        )
+
+        relative_curve_error = (
+            np.linalg.norm(actual_errors - reference_errors)
+            / np.linalg.norm(reference_errors)
+        )
+        relative_result_error = (
+            torch.linalg.vector_norm(actual - reference)
+            / torch.linalg.vector_norm(reference)
+        )
+        self.assertLess(float(relative_curve_error), 2e-2)
+        self.assertLess(float(relative_result_error), 2e-2)
+
+    def test_planar_half_cholesky_end_to_end_builds_streaming_factor(self):
+        rng = np.random.default_rng(37)
+        measurement_count = 64
+        input_shape = (4, 4)
+        output_shape = (2, 2)
+        input_count = int(np.prod(input_shape))
+        output_count = int(np.prod(output_shape))
+        phase = rng.integers(
+            0, 16, size=(measurement_count,) + input_shape, dtype=np.uint8
+        )
+        probes = np.exp(1j * phase.astype(np.float32) * np.pi / 8).astype(
+            np.complex64
+        )
+        true_h = (
+            rng.standard_normal((output_count, input_count))
+            + 1j * rng.standard_normal((output_count, input_count))
+        ).astype(np.complex64)
+        field = probes.reshape(measurement_count, input_count) @ true_h.T
+        intensity = np.rint(np.abs(field) ** 2 * 100).astype(np.uint16)
+
+        with tempfile.TemporaryDirectory() as directory:
+            probe_path = os.path.join(directory, "probe.npy")
+            measurement_path = os.path.join(directory, "measurements.raw")
+            output_path = os.path.join(directory, "tm.npy")
+            metadata_path = os.path.join(directory, "reconstruction.json")
+            factor_path = os.path.join(directory, "factor.npy")
+            np.save(probe_path, probes)
+            intensity.tofile(measurement_path)
+
+            result = reconstruct_tm(
+                ReconstructionConfig(
+                    measurement_path=measurement_path,
+                    probe_path=probe_path,
+                    output_path=output_path,
+                    error_curve_path=os.path.join(directory, "error.npy"),
+                    metadata_path=metadata_path,
+                    cholesky_cache_path=factor_path,
+                    input_shape=input_shape,
+                    output_shape=output_shape,
+                    iterations=20,
+                    gs2_ratio=0.75,
+                    output_chunk_size=2,
+                    adjoint_row_chunk=17,
+                    probe_storage="planar_complex32",
+                    solver="cholesky",
+                    device=str(self.device),
+                    resume=False,
+                )
+            )
+
+            output = np.load(output_path)
+            self.assertEqual(output.shape, (output_count, input_count))
+            self.assertTrue(bool(np.isfinite(output).all()))
+            self.assertTrue(os.path.isfile(factor_path))
+            with open(factor_path + ".json", "r", encoding="utf-8") as handle:
+                factor_metadata = json.load(handle)
+            self.assertEqual(
+                factor_metadata["construction"], "streaming_probe_rows"
+            )
+            self.assertEqual(result["config"]["probe_storage"], "planar_complex32")
+            self.assertEqual(
+                result["dtype_pipeline"]["probe_compute"],
+                "planar torch.float16",
+            )
 
     def test_rhs_normalization_avoids_half_overflow(self):
         matrix = self.random_complex((32, 48)) * 1e-3
