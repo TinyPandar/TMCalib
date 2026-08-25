@@ -29,7 +29,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--measurements",
         required=True,
-        help="Measured camera intensities .npy, shape [K,Hout,Wout] or [K,M]",
+        help=(
+            "Measured camera intensities: standard .npy or TMCalib's headerless "
+            "uint16 measurement memmap"
+        ),
     )
     parser.add_argument(
         "--profile",
@@ -272,6 +275,23 @@ def main() -> None:
         log_every=args.log_every,
     )
 
+    # The fitter tracks the baseline PCC as the initial best value. In the MVP
+    # implementation the corresponding zero-correction state was not saved, so
+    # a run with no validation improvement could finish with a slightly worse
+    # last-epoch model. Never export that regression: restore the identity gain.
+    reverted_to_baseline = False
+    if result.best_val_pcc <= result.baseline_val_pcc + 1e-12:
+        with torch.no_grad():
+            if model.phase_coeff.numel():
+                model.phase_coeff.zero_()
+            if model.amplitude_coeff.numel():
+                model.amplitude_coeff.zero_()
+        result.final_train_pcc = result.baseline_train_pcc
+        result.final_val_pcc = result.baseline_val_pcc
+        result.best_val_pcc = result.baseline_val_pcc
+        reverted_to_baseline = True
+        print("no held-out validation improvement; restored zero-correction baseline")
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -306,6 +326,7 @@ def main() -> None:
         "final_train_pcc": result.final_train_pcc,
         "final_val_pcc": result.final_val_pcc,
         "best_val_pcc": result.best_val_pcc,
+        "reverted_to_baseline": reverted_to_baseline,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
