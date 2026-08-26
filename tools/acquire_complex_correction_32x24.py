@@ -1,6 +1,6 @@
 """Acquire camera responses for the 32x24 complex correction probe set.
 
-This is a small hardware-only acquisition entry point.  It reuses the tested
+This is a small hardware-only acquisition entry point. It reuses the tested
 CameraHandler and DMDController from calibrate_v4_32x24.py, but writes a
 separate measurement file so the GGS21 reconstruction data are not touched.
 
@@ -9,7 +9,6 @@ Run from the TMCalib repository root on the Windows measurement workstation.
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -75,6 +74,31 @@ def _release_dmd(dmd):
         pass
     dmd.dev_id = None
     dmd.is_init = False
+
+
+def _flush_camera_stream(camera, dmd, roi_h, roi_w):
+    """Project one white frame in a separate acquisition session.
+
+    The main v4 GGS21 measurement path deliberately does this before every
+    pattern batch. juoptStop/clear_sequence can leave a stale/blank frame in the
+    camera stream; stopping the camera after this white frame flushes that state
+    before the real batch starts. Without this step probe/measurement pairing can
+    become shifted by one frame and the TM PCC collapses to ~0 even when the TM
+    itself is fine.
+    """
+    camera.start()
+    try:
+        white_roi = dmd._capture_white_speckle_roi(roi_h, roi_w)
+        if white_roi is None:
+            print("warning: camera preflush white frame was not captured")
+        else:
+            print(
+                "camera preflush: mean={:.3f} std={:.3f}".format(
+                    float(np.mean(white_roi)), float(np.std(white_roi))
+                )
+            )
+    finally:
+        camera.stop()
 
 
 def acquire(
@@ -148,13 +172,17 @@ def acquire(
         print("  camera ROI: {}x{}".format(roi_w, roi_h))
         print("  DMD: {}".format(device_name))
         print("  batch size: {}".format(batch_size))
+        print("  preflush: white frame + fresh camera session before every batch")
         print("  output: {}".format(output_path))
 
         for start in range(0, sample_count, batch_size):
             stop = min(start + batch_size, sample_count)
-            batch_patterns = np.asarray(
-                patterns[start:stop], dtype=np.uint8
-            )
+            batch_patterns = np.asarray(patterns[start:stop], dtype=np.uint8)
+
+            # Match calibrate_v4_32x24.run_measurement(): use a separate white
+            # acquisition to consume any stale frame, stop the stream, then
+            # start a clean acquisition for the actual pattern batch.
+            _flush_camera_stream(camera, dmd, roi_h, roi_w)
 
             camera.start()
             try:
@@ -182,13 +210,29 @@ def acquire(
                 )
 
             roi = images[:, :roi_h, :roi_w]
-            measurements[start:stop] = roi.reshape(stop - start, -1).astype(
-                np.uint16
-            )
-            measurements.flush()
+            flattened = roi.reshape(stop - start, -1)
+            frame_std = np.std(flattened.astype(np.float32), axis=1)
+            frame_mean = np.mean(flattened.astype(np.float32), axis=1)
             print(
-                "measured correction probes: {}/{}".format(stop, sample_count)
+                "  batch {}:{} frame mean median={:.3f}, std min/median={:.3f}/{:.3f}".format(
+                    start,
+                    stop,
+                    float(np.median(frame_mean)),
+                    float(np.min(frame_std)),
+                    float(np.median(frame_std)),
+                )
             )
+            near_flat = np.flatnonzero(frame_std < 1e-3)
+            if near_flat.size:
+                print(
+                    "  WARNING: near-flat captured frames at dataset indices {}".format(
+                        (near_flat[:16] + start).tolist()
+                    )
+                )
+
+            measurements[start:stop] = flattened.astype(np.uint16)
+            measurements.flush()
+            print("measured correction probes: {}/{}".format(stop, sample_count))
 
         metadata = {
             "purpose": "post-reconstruction gradient TM correction",
@@ -202,6 +246,7 @@ def acquire(
             "dmd_index": int(dmd_index),
             "dmd_device": device_name,
             "batch_size": batch_size,
+            "camera_preflush_white_frame": True,
             "source_metadata": source_metadata,
         }
         with metadata_path.open("w", encoding="utf-8") as stream:
