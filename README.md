@@ -152,3 +152,21 @@ python -m unittest discover -s tests -v
 - 26×26 的 I0/I90 已参数化，并统一使用最新版可配置重建器。
 - 下一步重构应逐步抽取公共相机、DMD 和采集类，并用模拟硬件测试保护行为；不要一次性重写硬件控制链。
 - 项目当前未附带开源许可证；公开发布前请由代码所有者选择许可证。
+
+## 振幅级数标定
+
+4 倍 `fourfold_128x96` Profile 提供独立的全场振幅响应实验。默认扫描
+0–1 的41个振幅级，每级重复10次；每次重复随机打乱顺序，并在首尾插入
+黑场和满幅参考，以分离振幅非线性与激光慢漂。
+
+```powershell
+# 仅生成协议和41张唯一DMD图样，不打开硬件
+python -m tools.amplitude_level_calibration_128x96 --prepare-only
+
+# 连接现有 JUOPT DMD + 128×128 相机采集链，并自动生成曲线与LUT
+python -m tools.amplitude_level_calibration_128x96 --acquire
+```
+
+输出包含原始帧、逐帧归一化、振幅/强度响应曲线、最低可检测振幅、
+相邻级可分辨性和256级反向LUT。完整协议见
+[振幅级数标定实验](docs/AMPLITUDE_LEVEL_CALIBRATION.md)。
