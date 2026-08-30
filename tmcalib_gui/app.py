@@ -213,6 +213,7 @@ class MainWindow(QMainWindow):
         self.channel_combo.setEnabled(channel_enabled)
         self.profile_summary.setText(format_profile_summary(profile_name))
         self._refresh_command()
+        self._update_buttons()
 
     def _refresh_command(self) -> None:
         spec = build_launch_spec(
