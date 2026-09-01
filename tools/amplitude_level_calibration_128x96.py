@@ -18,6 +18,7 @@ import csv
 import json
 import math
 import os
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -32,6 +33,8 @@ DEFAULT_LEVEL_COUNT = 41
 DEFAULT_REPEATS = 10
 DEFAULT_SEED = 20260827
 DEFAULT_EXPOSURE_US = 60.0
+DEFAULT_SETTLE_MS = 50.0
+DEFAULT_CAPTURE_ATTEMPTS = 3
 DEFAULT_SENSOR_MAX = 255.0
 DISTINGUISHABILITY_Z = 3.0
 
@@ -217,7 +220,7 @@ def compute_response(
         if white <= dark:
             raise RuntimeError(
                 "repeat {} has white anchor <= dark anchor ({:.4f} <= {:.4f})".format(
-                    block[0].repeat_index, white, dark
+                    block[0].repeat_index + 1, white, dark
                 )
             )
         repeat_anchors[block[0].repeat_index] = (dark, white)
@@ -437,6 +440,76 @@ def analyze_and_save(
     return experiment_summary
 
 
+def capture_single_pattern(
+    controller,
+    camera,
+    pattern: np.ndarray,
+    settle_seconds: float,
+) -> np.ndarray:
+    """Capture one frame while a single DMD pattern repeats continuously.
+
+    A fresh camera acquisition session starts only after the DMD has settled.
+    Therefore an operating-system stall or missed hardware trigger cannot
+    advance the camera to a different pattern.
+    """
+    pattern = np.asarray(pattern, dtype=np.uint8)
+    if pattern.shape != DMD_SHAPE:
+        raise ValueError(
+            "single pattern shape {}; expected {}".format(pattern.shape, DMD_SHAPE)
+        )
+    settle_seconds = float(settle_seconds)
+    if not math.isfinite(settle_seconds) or settle_seconds < 0.0:
+        raise ValueError("settle_seconds must be a finite non-negative value")
+
+    projection_started = False
+    camera_started = False
+    try:
+        pattern_batch = np.ascontiguousarray(pattern[None, ...], dtype=np.uint8)
+        if not controller.load_pattern(pattern_batch):
+            raise RuntimeError("failed to load one DMD calibration pattern")
+        projection_result = controller.DMD.juoptProjection(
+            controller.dev_id, 0, 0
+        )
+        if projection_result not in (None, 0):
+            raise RuntimeError(
+                "single-pattern projection failed: {}".format(projection_result)
+            )
+        projection_started = True
+        if settle_seconds:
+            time.sleep(settle_seconds)
+
+        # BeginAcquisition after settling creates an empty stream buffer. The
+        # next accepted trigger can only correspond to the repeating pattern.
+        camera.start()
+        camera_started = True
+        image, _, _ = camera.run()
+        if image is None:
+            raise RuntimeError("camera did not return a calibration frame")
+        image = np.asarray(image)
+        if image.shape != CAMERA_SHAPE:
+            raise RuntimeError(
+                "camera returned {}; expected {}".format(image.shape, CAMERA_SHAPE)
+            )
+        return np.array(image, copy=True)
+    finally:
+        # Stop the trigger source first, then close the camera stream so the
+        # next capture cannot inherit a queued frame from this pattern.
+        if projection_started:
+            try:
+                controller.DMD.juoptStop(controller.dev_id)
+            except Exception:
+                pass
+        if camera_started:
+            try:
+                camera.stop()
+            except Exception:
+                pass
+        try:
+            controller.clear_sequence(0)
+        except Exception:
+            pass
+
+
 def acquire_frames(
     entries: Sequence[SequenceEntry],
     pattern_cache: Dict[float, np.ndarray],
@@ -444,8 +517,10 @@ def acquire_frames(
     camera_index: int,
     exposure_us: float,
     dmd_device_name: Optional[str],
+    settle_ms: float,
+    capture_attempts: int,
 ) -> np.ndarray:
-    """Acquire one randomized repeat at a time through existing hardware classes."""
+    """Acquire every entry as an independently aligned single-pattern frame."""
     import calibrate_128x96 as profile
 
     camera = None
@@ -456,6 +531,12 @@ def acquire_frames(
         dtype=np.uint16,
         shape=(len(entries), CAMERA_SHAPE[0], CAMERA_SHAPE[1]),
     )
+    settle_seconds = float(settle_ms) / 1000.0
+    if not math.isfinite(settle_seconds) or settle_seconds < 0.0:
+        raise ValueError("settle_ms must be a finite non-negative value")
+    capture_attempts = int(capture_attempts)
+    if capture_attempts < 1:
+        raise ValueError("capture_attempts must be at least 1")
     try:
         camera = profile.core.CameraHandler(cam_index=camera_index, save_path="./camera_1")
         camera.convert_to_12bit = False
@@ -471,21 +552,74 @@ def acquire_frames(
             )
         if not controller.initialize_device(selected_device):
             raise RuntimeError("failed to initialize DMD {!r}".format(selected_device))
-        camera.start()
 
-        for block in entries_by_repeat(entries):
-            patterns = patterns_for_entries(block, pattern_cache)
-            captured = controller.project_and_caption(patterns)
-            if captured is None or captured.shape != (len(block),) + CAMERA_SHAPE:
+        blocks = entries_by_repeat(entries)
+        for block in blocks:
+            for entry in block:
+                pattern = pattern_cache[float(entry.commanded_amplitude)]
+                last_error: Optional[Exception] = None
+                for attempt in range(1, capture_attempts + 1):
+                    try:
+                        image = capture_single_pattern(
+                            controller,
+                            camera,
+                            pattern,
+                            settle_seconds=settle_seconds,
+                        )
+                        raw[entry.sequence_index] = np.rint(image).astype(np.uint16)
+                        last_error = None
+                        break
+                    except Exception as error:
+                        last_error = error
+                        print(
+                            "Capture retry {}/{} for sequence {}: {}".format(
+                                attempt,
+                                capture_attempts,
+                                entry.sequence_index,
+                                error,
+                            ),
+                            flush=True,
+                        )
+                if last_error is not None:
+                    raise RuntimeError(
+                        "failed to capture sequence {} after {} attempts".format(
+                            entry.sequence_index, capture_attempts
+                        )
+                    ) from last_error
+
+            indices = [entry.sequence_index for entry in block]
+            raw.flush()
+            block_metrics = _mean_frame_metric(raw[indices])
+            dark_values = [
+                block_metrics[position]
+                for position, entry in enumerate(block)
+                if entry.kind == "dark_anchor"
+            ]
+            white_values = [
+                block_metrics[position]
+                for position, entry in enumerate(block)
+                if entry.kind == "white_anchor"
+            ]
+            dark_mean = float(np.mean(dark_values))
+            white_mean = float(np.mean(white_values))
+            print(
+                "Repeat {}/{} anchors: dark={:.4f}, white={:.4f}".format(
+                    block[0].repeat_index + 1,
+                    len(blocks),
+                    dark_mean,
+                    white_mean,
+                ),
+                flush=True,
+            )
+            if white_mean <= dark_mean:
                 raise RuntimeError(
-                    "capture returned {}; expected {}".format(
-                        None if captured is None else captured.shape,
-                        (len(block),) + CAMERA_SHAPE,
+                    "repeat {} failed immediate anchor validation: "
+                    "white {:.4f} <= dark {:.4f}".format(
+                        block[0].repeat_index + 1,
+                        white_mean,
+                        dark_mean,
                     )
                 )
-            indices = [entry.sequence_index for entry in block]
-            raw[indices] = np.rint(captured).astype(np.uint16)
-            raw.flush()
             print(
                 "Captured repeat {}/{}".format(
                     block[0].repeat_index + 1,
@@ -543,6 +677,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase-rad", type=float, default=0.0)
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--exposure-us", type=float, default=DEFAULT_EXPOSURE_US)
+    parser.add_argument(
+        "--settle-ms",
+        type=float,
+        default=DEFAULT_SETTLE_MS,
+        help="single-pattern DMD settling time before opening the camera stream",
+    )
+    parser.add_argument(
+        "--capture-attempts",
+        type=int,
+        default=DEFAULT_CAPTURE_ATTEMPTS,
+        help="maximum attempts for each independently captured pattern",
+    )
     parser.add_argument("--sensor-max", type=float, default=DEFAULT_SENSOR_MAX)
     parser.add_argument("--dmd-device", default=None)
     parser.add_argument(
@@ -579,6 +725,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "repeat_count": int(args.repeats),
         "random_seed": int(args.seed),
         "exposure_us": float(args.exposure_us),
+        "settle_ms": float(args.settle_ms),
+        "capture_attempts": int(args.capture_attempts),
+        "acquisition_mode": (
+            "one repeating DMD pattern and one clean camera session per frame"
+        ),
         "sensor_max": float(args.sensor_max),
         "distinguishability_z": float(args.distinguishability_z),
         "sequence_length": len(entries),
@@ -618,6 +769,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         camera_index=args.camera_index,
         exposure_us=args.exposure_us,
         dmd_device_name=args.dmd_device,
+        settle_ms=args.settle_ms,
+        capture_attempts=args.capture_attempts,
     )
     summary = analyze_and_save(
         frames,

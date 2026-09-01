@@ -12,6 +12,7 @@ from tools.amplitude_level_calibration_128x96 import (
     build_inverse_lut,
     build_pattern_cache,
     build_sequence,
+    capture_single_pattern,
     compute_response,
     entries_by_repeat,
 )
@@ -19,6 +20,62 @@ from dmd_pattern_128 import _holo_sp_mean_vectorized
 
 
 class AmplitudeLevelCalibrationTests(unittest.TestCase):
+    def test_single_pattern_capture_uses_a_clean_camera_session(self):
+        events = []
+
+        class FakeDMD:
+            def juoptProjection(self, device_id, sequence_id, offset):
+                events.append(("project", device_id, sequence_id, offset))
+                return 0
+
+            def juoptStop(self, device_id):
+                events.append(("dmd_stop", device_id))
+                return 0
+
+        class FakeController:
+            def __init__(self):
+                self.DMD = FakeDMD()
+                self.dev_id = 7
+
+            def load_pattern(self, batch):
+                events.append(("load", tuple(batch.shape)))
+                return True
+
+            def clear_sequence(self, sequence_id):
+                events.append(("clear", sequence_id))
+                return True
+
+        class FakeCamera:
+            def start(self):
+                events.append(("camera_start",))
+
+            def run(self):
+                events.append(("camera_run",))
+                return np.full(CAMERA_SHAPE, 12, dtype=np.uint8), 0.0, 0.0
+
+            def stop(self):
+                events.append(("camera_stop",))
+
+        image = capture_single_pattern(
+            FakeController(),
+            FakeCamera(),
+            np.zeros(DMD_SHAPE, dtype=np.uint8),
+            settle_seconds=0.0,
+        )
+        self.assertEqual(image.shape, CAMERA_SHAPE)
+        self.assertEqual(
+            [event[0] for event in events],
+            [
+                "load",
+                "project",
+                "camera_start",
+                "camera_run",
+                "dmd_stop",
+                "camera_stop",
+                "clear",
+            ],
+        )
+
     def test_sequence_is_randomized_and_bracketed_by_anchors(self):
         levels = build_amplitude_levels(9)
         entries = build_sequence(levels, repeats=4, seed=17)
