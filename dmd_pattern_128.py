@@ -53,7 +53,13 @@ def validate_input_field(field):
     return field.astype(np.complex64, copy=False)
 
 
-def _holo_sp_mean_vectorized(field, lut, pixel_combinations, step=0.01):
+def _holo_sp_mean_vectorized(
+    field,
+    lut,
+    pixel_combinations,
+    step=0.01,
+    renorm=True,
+):
     """Bit-exact vectorized equivalent of ``holo_SP(..., ds_method='mean')``.
 
     The reference implementation loops over all 192 x 192 optical
@@ -63,9 +69,12 @@ def _holo_sp_mean_vectorized(field, lut, pixel_combinations, step=0.01):
     """
     field = np.asarray(field).copy()
     max_amplitude = np.max(np.abs(field))
-    if max_amplitude <= 0:
-        raise ValueError("Cannot encode an all-zero complex field")
-    field /= max_amplitude
+    if renorm:
+        if max_amplitude <= 0:
+            raise ValueError("Cannot renormalize an all-zero complex field")
+        field /= max_amplitude
+    elif max_amplitude > 1.0 + 1e-6:
+        raise ValueError("Absolute complex-field amplitudes must lie in [0, 1]")
 
     combination_length = len(pixel_combinations[0])
     n_sp = int(np.sqrt(combination_length))
@@ -80,9 +89,15 @@ def _holo_sp_mean_vectorized(field, lut, pixel_combinations, step=0.01):
     downsampled /= n_sp**2
 
     downsampled_max = np.max(np.abs(downsampled))
-    if downsampled_max <= 0:
-        raise ValueError("Downsampled complex field is all zero")
-    scaled = downsampled / (downsampled_max * step)
+    if renorm:
+        if downsampled_max <= 0:
+            raise ValueError("Downsampled complex field is all zero")
+        scaled = downsampled / (downsampled_max * step)
+    else:
+        # The LUT spans real/imaginary values in [-1, 1].  Do not divide by
+        # the field maximum here: calibration needs 0.5 and 1.0 to select
+        # different superpixel codes instead of both becoming full scale.
+        scaled = downsampled / step
 
     lut_zero = len(lut) // 2
     real_index = np.rint(np.real(scaled)).astype(np.intp) + lut_zero
@@ -113,6 +128,7 @@ def input_field_to_active_hologram(
     px=HOLOGRAM_SUPERPIXEL_SIZE,
     ds_method="mean",
     lut_cache=None,
+    renorm=True,
 ):
     """Encode a 128 x 128 field into a 512 x 512 binary active hologram."""
     field = validate_input_field(field)
@@ -140,8 +156,11 @@ def input_field_to_active_hologram(
             expanded_field,
             lut,
             pixel_combinations,
+            renorm=renorm,
         )
     else:
+        if not renorm:
+            raise ValueError("renorm=False currently requires ds_method='mean'")
         hologram = holo_SP(
             expanded_field,
             lut,
@@ -181,6 +200,7 @@ def input_field_to_dmd_pattern(
     px=HOLOGRAM_SUPERPIXEL_SIZE,
     ds_method="mean",
     lut_cache=None,
+    renorm=True,
 ):
     """Convert one logical complex field into one full-size DMD pattern."""
     active_hologram = input_field_to_active_hologram(
@@ -188,6 +208,7 @@ def input_field_to_dmd_pattern(
         px=px,
         ds_method=ds_method,
         lut_cache=lut_cache,
+        renorm=renorm,
     )
     return active_hologram_to_dmd_canvas(active_hologram)
 

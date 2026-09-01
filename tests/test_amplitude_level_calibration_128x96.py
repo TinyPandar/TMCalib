@@ -15,6 +15,7 @@ from tools.amplitude_level_calibration_128x96 import (
     compute_response,
     entries_by_repeat,
 )
+from dmd_pattern_128 import _holo_sp_mean_vectorized
 
 
 class AmplitudeLevelCalibrationTests(unittest.TestCase):
@@ -49,9 +50,43 @@ class AmplitudeLevelCalibrationTests(unittest.TestCase):
 
         cache = build_pattern_cache([0.0, 0.5, 1.0], phase_rad=np.pi / 3, encoder=fake_encoder)
         self.assertEqual(sorted(cache), [0.0, 0.5, 1.0])
+        self.assertFalse(np.any(cache[0.0]))
         self.assertEqual(cache[0.5].shape, DMD_SHAPE)
+        self.assertEqual(len(seen), 2)
         for field in seen:
             np.testing.assert_allclose(field, field[0, 0])
+        np.testing.assert_allclose(
+            sorted(float(np.abs(field[0, 0])) for field in seen),
+            [0.5, 1.0],
+        )
+
+    def test_absolute_lut_scaling_does_not_renormalize_each_level(self):
+        lut = np.zeros((201, 201), dtype=np.intp)
+        lut[150, 100] = 1
+        lut[200, 100] = 2
+        pixel_combinations = np.asarray(
+            [
+                [0, 0, 0, 0],
+                [1, 0, 0, 0],
+                [1, 1, 0, 0],
+            ],
+            dtype=np.uint8,
+        )
+        half = _holo_sp_mean_vectorized(
+            np.full((2, 2), 0.5 + 0.0j),
+            lut,
+            pixel_combinations,
+            renorm=False,
+        )
+        full = _holo_sp_mean_vectorized(
+            np.full((2, 2), 1.0 + 0.0j),
+            lut,
+            pixel_combinations,
+            renorm=False,
+        )
+        self.assertEqual(int(np.sum(half)), 1)
+        self.assertEqual(int(np.sum(full)), 2)
+        self.assertFalse(np.array_equal(half, full))
 
     def test_synthetic_quadratic_response_recovers_amplitude(self):
         levels = build_amplitude_levels(11)

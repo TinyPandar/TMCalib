@@ -80,6 +80,7 @@ def input_field_to_active_hologram(
     px=HOLOGRAM_SUPERPIXEL_SIZE,
     ds_method="mean",
     lut_cache=None,
+    renorm=True,
 ):
     """Encode one source field into a full-size 768 x 1024 hologram."""
     px = int(px)
@@ -108,8 +109,11 @@ def input_field_to_active_hologram(
             expanded_physical,
             lut,
             pixel_combinations,
+            renorm=renorm,
         )
     else:
+        if not renorm:
+            raise ValueError("renorm=False currently requires ds_method='mean'")
         from holograms.dmd_holograms import holo_SP
 
         hologram = holo_SP(
@@ -143,6 +147,7 @@ def input_field_to_dmd_pattern(
     px=HOLOGRAM_SUPERPIXEL_SIZE,
     ds_method="mean",
     lut_cache=None,
+    renorm=True,
 ):
     """Convert one 96 x 128 complex field to a 1024 x 768 DMD pattern."""
     return input_field_to_active_hologram(
@@ -150,6 +155,7 @@ def input_field_to_dmd_pattern(
         px=px,
         ds_method=ds_method,
         lut_cache=lut_cache,
+        renorm=renorm,
     )
 
 

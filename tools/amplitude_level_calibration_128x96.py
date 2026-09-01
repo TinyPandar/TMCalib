@@ -104,7 +104,10 @@ def entries_by_repeat(entries: Sequence[SequenceEntry]) -> List[List[SequenceEnt
 def _default_encoder(field: np.ndarray) -> np.ndarray:
     from dmd_pattern_128x96 import input_field_to_dmd_pattern
 
-    return input_field_to_dmd_pattern(field)
+    # Amplitude calibration requires absolute [0, 1] scaling.  The normal
+    # image path deliberately renormalizes every field to its own maximum,
+    # which would otherwise make every positive uniform level identical.
+    return input_field_to_dmd_pattern(field, renorm=False)
 
 
 def build_pattern_cache(
@@ -118,6 +121,13 @@ def build_pattern_cache(
     phase_factor = np.complex64(np.exp(1j * float(phase_rad)))
     cache: Dict[float, np.ndarray] = {}
     for amplitude in sorted({float(value) for value in amplitudes}):
+        if not math.isfinite(amplitude) or not 0.0 <= amplitude <= 1.0:
+            raise ValueError("amplitudes must be finite values in [0, 1]")
+        if amplitude == 0.0:
+            # A zero complex field cannot be normalized by a hologram encoder.
+            # It is also exactly the physical dark command required here.
+            cache[amplitude] = np.zeros(DMD_SHAPE, dtype=np.uint8)
+            continue
         field = np.full(
             INPUT_SHAPE,
             np.float32(amplitude) * phase_factor,
@@ -573,6 +583,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "distinguishability_z": float(args.distinguishability_z),
         "sequence_length": len(entries),
         "normalization": "per-repeat dark/white anchors; A_meas=sqrt((I-I_dark)/(I_white-I_dark))",
+        "hologram_amplitude_scaling": (
+            "absolute [0,1] LUT scaling with encoder renormalization disabled; "
+            "A=0 uses an all-off DMD pattern"
+        ),
     }
     write_json(os.path.join(output_dir, "protocol.json"), metadata)
 
