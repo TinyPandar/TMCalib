@@ -4,7 +4,7 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from tmcalib.events import EventBus, EventKind, WorkflowEvent
 from tmcalib.ports import (
@@ -98,9 +98,10 @@ class CalibrationWorkflow:
         running_state: WorkflowState,
         function: Callable[[], OperationResult],
         success_state: WorkflowState = WorkflowState.IDLE,
+        allowed_states: Tuple[WorkflowState, ...] = (WorkflowState.IDLE,),
     ) -> Future:
         with self._lock:
-            if self._state not in (WorkflowState.DISCONNECTED, WorkflowState.IDLE):
+            if self._state not in allowed_states:
                 raise RuntimeError(
                     "Cannot start {} while workflow state is {}".format(
                         operation, self._state.value
@@ -147,6 +148,7 @@ class CalibrationWorkflow:
             WorkflowState.CONNECTING,
             self.services.camera.connect,
             success_state=WorkflowState.IDLE,
+            allowed_states=(WorkflowState.DISCONNECTED,),
         )
 
     def set_exposure_us(self, value: float) -> float:
@@ -240,7 +242,7 @@ class CalibrationWorkflow:
             return
         self._set_state(WorkflowState.STOPPING, "stop")
         self.services.cancellation.stop_all()
-        self._set_state(WorkflowState.IDLE, "stop", "Stop requested")
+        self._log("stop", "Stop requested; waiting for the active operation")
 
     def close(self) -> None:
         if self.state == WorkflowState.CLOSED:
