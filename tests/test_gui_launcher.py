@@ -38,14 +38,14 @@ class GuiLauncherTests(unittest.TestCase):
 
     def test_profile_summary_contains_dimensions(self):
         summary = format_profile_summary("fivefold_160x120")
-        self.assertIn("160 x 120", summary)
-        self.assertIn("128 x 128", summary)
-        self.assertIn("1024 x 768", summary)
+        self.assertIn("160 × 120", summary)
+        self.assertIn("128 × 128", summary)
+        self.assertIn("1024 × 768", summary)
 
     def test_cholesky_profile_reuses_v4_dimensions(self):
         spec = build_launch_spec("v4_32x24_cholesky")
         self.assertEqual(spec.profile, "v4_32x24_cholesky")
-        self.assertIn("32 x 24", format_profile_summary(spec.profile))
+        self.assertIn("32 × 24", format_profile_summary(spec.profile))
 
     def test_polarization_capability(self):
         self.assertTrue(profile_supports_channel("dense_128x128_roi26"))
