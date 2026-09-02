@@ -54,6 +54,10 @@ from measurement_quality_report import (
     build_measurement_quality_figure,
     save_measurement_quality_outputs,
 )
+from calibration_profiles import (
+    normalize_polarization_channel,
+    pyspin_polarization_quadrant,
+)
 import atexit
 import signal
 
@@ -112,7 +116,15 @@ PATTERN_128_CONFIG = {
 }
 
 
-def get_active_128_pattern_config():
+def _tag_output_filename(filename, output_tag=None):
+    """Append a profile-specific tag without changing the base dataset name."""
+    if not output_tag:
+        return filename
+    root, extension = os.path.splitext(str(filename))
+    return "{}_{}{}".format(root, output_tag, extension)
+
+
+def get_active_128_pattern_config(output_tag=None):
     """Return and validate the configured full-calibration pattern set."""
     active = PATTERN_128_CONFIG.get("active")
     datasets = PATTERN_128_CONFIG.get("sets", {})
@@ -124,6 +136,15 @@ def get_active_128_pattern_config():
         )
 
     config = dict(datasets[active])
+    for key in (
+        "measurement_filename",
+        "tm_memmap_filename",
+        "reconstructed_filename",
+        "error_curve_filename",
+        "reconstruction_metadata_filename",
+    ):
+        config[key] = _tag_output_filename(config[key], output_tag)
+    config["output_tag"] = output_tag
     config["name"] = active
     config["directory"] = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -136,7 +157,15 @@ def get_active_128_pattern_config():
     return config
 
 class CameraHandler:
-    def __init__(self, cam_index, save_path):
+    def __init__(
+        self,
+        cam_index,
+        save_path,
+        roi_shape=(128, 128),
+        polarization_channel="I90",
+        exposure_us=CAMERA_EXPOSURE_US,
+        output_tag=None,
+    ):
         self.cam_index = cam_index
         self.save_path = save_path
         self.is_running = True
@@ -160,11 +189,15 @@ class CameraHandler:
         # one pixel in every 2x2 micro-polarizer cell.
         self.roi_x = 296
         self.roi_y = 206
-        self.roi_width = 128
-        self.roi_height = 128
-        # Sony PolarSens layout: the top-left micro-polarizer is the 90-degree
-        # channel. Use the SDK enum so the intent is explicit.
-        self.polarization_quadrant = PySpin.SPINNAKER_POLARIZATION_QUADRANT_I90
+        self.roi_height = int(roi_shape[0])
+        self.roi_width = int(roi_shape[1])
+        self.polarization_channel = normalize_polarization_channel(
+            polarization_channel
+        )
+        self.polarization_quadrant = pyspin_polarization_quadrant(
+            PySpin, self.polarization_channel
+        )
+        self.output_tag = output_tag
 
         self.system = PySpin.System.GetInstance()
         self.cam_list = self.system.GetCameras()
@@ -188,9 +221,9 @@ class CameraHandler:
             self.cleanup()
             raise RuntimeError("无法配置偏振相机 ROI")
 
-        # 1.5 ms exposure leaves 0.5 ms of margin in the 2 ms (500 Hz)
-        # DMD picture period configured below.
-        self.configure_exposure(exposure_time=CAMERA_EXPOSURE_US)
+        # Exposure is part of the selected Profile. The workflow may update it
+        # later through CameraPort without changing the acquisition sequence.
+        self.configure_exposure(exposure_time=float(exposure_us))
         self.configure_gamma(gamma=1)
         self.configure_gain(gain=0)
         self.configure_buffer_handling()
@@ -284,7 +317,8 @@ class CameraHandler:
             print(
                 f"偏振ROI配置成功: raw X={raw_x}, Y={raw_y}, "
                 f"Width={raw_width}, Height={raw_height}; "
-                f"I90 output={self.roi_width}x{self.roi_height}"
+                f"{self.polarization_channel} output="
+                f"{self.roi_width}x{self.roi_height}"
             )
             return True
 
@@ -684,7 +718,8 @@ class DMDController:
         # No environment-variable setup is required.
         self.test_mode = False
         self.test_probe_count = 64
-        self.full_pattern_config = get_active_128_pattern_config()
+        self.output_tag = getattr(camera_handler, "output_tag", None)
+        self.full_pattern_config = get_active_128_pattern_config(self.output_tag)
         self.full_probe_multiplier = self.full_pattern_config["probe_multiplier"]
         self.full_probe_count = (
             self.full_probe_multiplier * self.dmd_width * self.dmd_height
@@ -698,7 +733,10 @@ class DMDController:
             ),
         )
         self.measurement_filename = (
-            "measurements_128_px4_active512_test_memmap.npy"
+            _tag_output_filename(
+                "measurements_128_px4_active512_test_memmap.npy",
+                self.output_tag,
+            )
             if self.test_mode
             else self.full_pattern_config["measurement_filename"]
         )
@@ -815,7 +853,10 @@ class DMDController:
             ),
         )
         self.measurement_filename = (
-            "measurements_128_px4_active512_test_memmap.npy"
+            _tag_output_filename(
+                "measurements_128_px4_active512_test_memmap.npy",
+                self.output_tag,
+            )
             if self.test_mode
             else self.full_pattern_config["measurement_filename"]
         )
@@ -3902,24 +3943,42 @@ class DMDController:
             print("Device released")
 
 class Application(tk.Tk):
-    def __init__(self):
+    camera_handler_class = CameraHandler
+    dmd_controller_class = DMDController
+
+    def __init__(
+        self,
+        camera_roi=(128, 128),
+        polarization_channel="I90",
+        exposure_us=CAMERA_EXPOSURE_US,
+        output_tag=None,
+        profile_title="DMD TM Calibration - 128x128 / px=4",
+    ):
         super().__init__()
-        self.title("DMD TM Calibration - 128x128 Input / px=4")
+        self.profile_title = str(profile_title)
+        self.title(self.profile_title)
         self.geometry("1440x810")
 
-        # Keep native Polarized8 values. Measurement storage remains uint16 so
-        # the existing reconstruction file layout does not change.
-        self.camera = CameraHandler(cam_index=0, save_path="./camera_1")
+        # Hardware implementations are class attributes so a profile can inject
+        # a specialized adapter without copying the UI or workflow.
+        self.camera = self.camera_handler_class(
+            cam_index=0,
+            save_path="./camera_1",
+            roi_shape=camera_roi,
+            polarization_channel=polarization_channel,
+            exposure_us=exposure_us,
+            output_tag=output_tag,
+        )
         self.camera.convert_to_12bit = False
 
-        # Initialize DMD controller
-        self.dmd_controller = DMDController(self.camera)
+        # Initialize the injected DMD controller.
+        self.dmd_controller = self.dmd_controller_class(self.camera)
         active_mode = (
             "64-pattern optical test"
             if self.dmd_controller.test_mode
             else f"{self.dmd_controller.full_probe_count}-pattern full measurement"
         )
-        self.title(f"DMD TM Calibration - 128x128 / px=4 - {active_mode}")
+        self.title(f"{self.profile_title} - {active_mode}")
 
         # Initialize measurement state
         self.measurement_running = False
@@ -4366,7 +4425,7 @@ class Application(tk.Tk):
             if test_mode
             else f"{self.dmd_controller.full_probe_count}-pattern full measurement"
         )
-        self.title(f"DMD TM Calibration - 128x128 / px=4 - {mode_title}")
+        self.title(f"{self.profile_title} - {mode_title}")
         self.btn_measure_start.config(
             text=(
                 "Run 64-Pattern Optical Test"
