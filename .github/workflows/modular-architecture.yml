@@ -1,0 +1,31 @@
+name: Modular architecture tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/pyside6-unified-gui
+
+jobs:
+  dependency-injection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+      - name: Compile hardware-independent modules
+        run: >-
+          python -m compileall -q
+          calibration_profiles.py
+          tmcalib
+          tmcalib_gui/launcher.py
+          tests
+      - name: Run profile and workflow contracts
+        run: >-
+          python -m unittest
+          tests.test_gui_launcher
+          tests.test_modular_workflow
+          tests.test_profile_architecture
+          -v
