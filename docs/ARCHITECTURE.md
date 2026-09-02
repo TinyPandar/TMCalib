@@ -1,44 +1,85 @@
-# 架构与代码谱系
+# TMCalib modular architecture
 
-## 配置维度
+The PySide6 application has one user interface and one application workflow.
+Experiment variants are immutable Profiles; they do not own windows, threads,
+or hardware lifecycle code.
 
-原目录中的 v4、128 和 llh_v2 并不是三个完全独立的系统，而是以下配置维度的组合：
+```mermaid
+flowchart TD
+    UI[PySide6 MainWindow] --> WF[CalibrationWorkflow]
+    WF --> P[Port protocols]
+    P --> A[LegacyHardwareAdapter]
+    A --> SDK[PySpin and JUOPT]
+    PS[ProfileSpec] --> WF
+    PS --> A
+```
 
-- 输入网格：32×24、160×120 或 128×128；
-- DMD 映射：全 1024×768、160×120 最近邻扩展到 256×192 超像素后铺满，或中央 512×512；
-- 相机输出：128×128 或 26×26；
-- 偏振通道：I0 或 I90；
-- Pattern 集：64 帧光学测试、4N 或 8N；
-- 重建器：普通伪逆、Cholesky 或 planar-complex32 低精度逆。
+## Dependency direction
 
-稳定标识定义在 `calibration_profiles.py`。实验输出名应包含输入 Profile、Pattern 集和偏振通道，避免不同实验互相覆盖。
+`tmcalib.workflow` depends only on Protocol interfaces from `tmcalib.ports`.
+It does not import Qt, Tkinter, PySpin, JUOPT, or any calibration script.
+`tmcalib.bootstrap` is the composition root: it resolves a Profile, creates the
+concrete adapter, and injects it into the workflow. This is the only layer that
+chooses an implementation.
 
-## 160×120 全场映射
+| Layer | Responsibility | May depend on |
+| --- | --- | --- |
+| `tmcalib_gui` | Rendering and user input | workflow, events, profiles |
+| `tmcalib.workflow` | Connect/measure/reconstruct/focus use cases | ports, events, profiles |
+| `tmcalib.ports` | Stable hardware and algorithm contracts | Python standard library |
+| `tmcalib.profiles` | Dimensions, defaults, capabilities, strategy keys | Python standard library |
+| `tmcalib.adapters` | Translate ports to existing hardware controllers | legacy scripts and vendor SDKs |
+| legacy scripts | Experiment-tested acquisition and trigger sequences | vendor SDKs and algorithms |
 
-`fivefold_160x120` 以 32×24 为基准扩大 5 倍，得到 160×120 的逻辑输入。由于 DMD 的 4×4 光学超像素网格是 256×192，两个方向的比例均为 1.6，不能用固定整数尺寸的源宏像素直接平铺。
+## Unified feature contract
 
-`dmd_pattern_160x120.py` 使用中心对齐最近邻索引把源场扩展为 256×192；每个源像素沿每一轴被重复 1 或 2 个光学超像素。之后每个扩展样本由一个 4×4 `holo_SP` tile 编码，因此所有 1024×768 微镜位置均属于有效区，没有外围 zero padding。数据 metadata 中以 `nearest_fill_160x120_to_256x192_v1` 固定这一映射契约。
+Every Profile currently exposes the same baseline capabilities:
 
-## 已完成的去重
+- camera connection, exposure control, and preview;
+- TM measurement and reconstruction;
+- coordinate-validated conjugate focusing;
+- progress, result, error, and frame events.
 
-- `llh_v2` 的 I0/I90 GUI 合并为 `calibrate_128x128_26x26.py --channel ...`。
-- 26×26 分支不再维护删减版重建器，而是调用 `tm_reconstruction_128.py` 并传入 `output_shape=(26, 26)`。
-- `fivefold_160x120` 通过薄配置层复用 128×128 相机输出的硬件采集与重建流程，不复制整套硬件控制文件。
-- `dmd_pattern_128.py` 只保留一份。
-- 原来位于仓库外部的 `holograms` 源码已纳入仓库。
+Optional features such as polarization selection, one-click calibration, and
+remote reconstruction are declared as capabilities. The GUI reads that data to
+enable controls. It does not switch on filenames or import a Profile-specific UI.
 
-## 暂时保留的重复
+To add a feature that must exist for every configuration:
 
-三个 GUI 文件仍包含重复的 `CameraHandler`、DMD SDK 绑定和部分聚焦代码。这是有意的过渡状态：这些代码直接控制硬件，在没有模拟硬件测试前贸然抽象会扩大实验风险。
+1. Add or extend one Protocol in `tmcalib.ports`.
+2. Implement the operation once in `CalibrationWorkflow`.
+3. Bind one GUI control to that workflow operation.
+4. Implement the Protocol in hardware adapters and test with `FakeHardware`.
 
-推荐后续顺序：
+No Profile file should copy the GUI or workflow. A new optical configuration is
+normally one `ProfileSpec` plus an encoder/reconstructor adapter strategy.
 
-1. 为 PySpin 和 JUOPT DLL 建立模拟接口及触发顺序测试。
-2. 原样抽取公共 `CameraHandler` 和低层 DMD API，不改变控制顺序。
-3. 把 Pattern 编码定义为 32×24、160×120 全场和 128×128 中央有效区三个策略。
-4. 抽取公共采集循环，Profile 只提供 shape、文件名和能力开关。
-5. 最后合并 GUI 控件和一键流程。
+## Compatibility boundary
 
-## 重建器
+Hardware trigger timing remains inside the legacy controllers. The adapter loads
+them lazily, so importing the GUI or running tests does not import vendor SDKs.
+The old `run_calibration.py` command continues to launch the retained Tk entry
+points for hardware rollback and comparison.
 
-`tm_reconstruction_128.py` 的名称保留是为了兼容现有导入，但其主体按 `ReconstructionConfig.input_shape` 和 `output_shape` 工作。正式重命名前应先保留一个兼容导入层，防止旧实验脚本失效。
+`calibrate_128x128_26x26.py` is now only a thin configuration wrapper around
+`calibrate_128x128.py`; fixes in the shared camera/controller implementation are
+therefore inherited by both ROI sizes. `calibrate_160x120.py` still adapts legacy
+module constants, so the compatibility adapter reloads the shared core before
+each new backend is composed. This prevents sequential Profile switches from
+retaining dimensions from a previous run while the encoder is migrated to a
+fully injected strategy.
+
+## Threading and events
+
+The workflow serializes hardware operations through a single-worker executor.
+This protects the camera/DMD sequence from concurrent measurement,
+reconstruction, and focus requests. Framework-neutral events are published from
+the worker thread; `QtEventBridge` queues them onto the GUI thread before any
+widget is touched.
+
+## Tests
+
+The dependency-injection tests use one `FakeHardware` object for every port. They
+verify the shared workflow, profile capability contract, one-click ordering,
+focus bounds, and lazy vendor imports without requiring a camera or DMD.
+
