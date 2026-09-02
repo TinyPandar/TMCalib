@@ -43,6 +43,12 @@ class ProfileTests(unittest.TestCase):
 
 
 class WorkflowInjectionTests(unittest.TestCase):
+    def test_operations_require_a_connected_idle_workflow(self):
+        workflow, _ = build_fake_workflow()
+        with self.assertRaises(RuntimeError):
+            workflow.measure()
+        workflow.close()
+
     def test_building_workflow_does_not_import_vendor_modules(self):
         before = set(sys.modules)
         from tmcalib.bootstrap import build_workflow
