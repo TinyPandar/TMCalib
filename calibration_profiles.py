@@ -42,9 +42,7 @@ PROFILES = {
         camera_roi=(128, 128),
         input_macro_pixel_size=4,
         active_shape=(512, 512),
-        capabilities=frozenset(
-            {"full_tm", "test64", "partial_tm", "one_click"}
-        ),
+        capabilities=frozenset({"full_tm", "test64", "partial_tm", "one_click"}),
     ),
     "dense_128x128_roi26": CalibrationProfile(
         name="dense_128x128_roi26",
