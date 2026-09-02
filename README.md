@@ -14,7 +14,7 @@
 | `dense_128x128` | 128×128 | 中央 512×512 | 128×128 | 稠密输入程序 |
 | `dense_128x128_roi26` | 128×128 | 中央 512×512 | 26×26 | I0/I90 可选偏振通道 |
 
-`llh_v2` 原来的 I0、I90 两个大文件已收敛为一个 `calibrate_128x128_26x26.py`，通道由启动参数选择。
+`llh_v2` 原来的 I0、I90 两个大文件已收敛为一个不足 80 行的 Profile 薄封装；相机、DMD、测量和重建实现统一复用 `calibrate_128x128.py`，通道由启动参数选择。
 
 ## 目录结构
 
@@ -22,7 +22,8 @@
 tmcalib-repo/
 ├── run_gui.py                         # PySide6 统一桌面控制台
 ├── run_calibration.py                 # 无 GUI/脚本化统一启动器
-├── tmcalib_gui/                        # GUI 与硬件无关的启动配置
+├── tmcalib/                            # Profile、端口、Workflow、适配器与依赖注入入口
+├── tmcalib_gui/                        # 唯一的 PySide6 用户界面
 ├── calibrate_v4_32x24.py              # 32×24 主程序
 ├── calibrate_160x120.py               # 160×120→128×128、全 DMD 主程序
 ├── calibrate_128x128.py               # 128×128→128×128 主程序
@@ -63,7 +64,7 @@ pip install -r requirements.txt
 
 ### PySide6 统一控制台
 
-统一控制台集中提供 Profile/偏振通道选择、尺寸与能力摘要、硬件安全确认、子进程启停和实时日志。它不会在启动窗口时导入 `PySpin` 或 JUOPT SDK；只有点击“启动标定”后，选中的现有标定程序才会加载硬件驱动。
+统一控制台直接驱动同一套 `CalibrationWorkflow`，集中提供 Profile/偏振通道选择、相机图像、曝光、测量、重建、聚焦、一键流程、停止、进度与日志。切换 Profile 只替换不可变配置和注入的后端策略，不再启动另一套 Tk 界面。窗口启动时不会导入 `PySpin` 或 JUOPT SDK；点击“连接相机与 DMD”后才延迟加载硬件驱动。
 
 ```powershell
 python run_gui.py
@@ -137,8 +138,9 @@ python -m unittest discover -s tests -v
 
 ## 代码状态
 
-- 已新增 PySide6 统一控制台，负责 Profile 选择、硬件安全确认、进程控制与日志汇总；各 Profile 内部经过实验使用的 Tkinter 硬件界面暂时保留，以避免一次性改动触发与采集时序。
-- 160×120 Profile 复用已验证的 128×128 相机采集顺序，仅替换输入维度、数据契约和 DMD 编码策略。
-- 26×26 的 I0/I90 已参数化，并统一使用最新版可配置重建器。
-- 下一步可在模拟硬件测试保护下，逐步抽取公共相机、DMD 和采集服务，再把各 Profile 的内部页面迁移为原生 Qt；不要一次性重写硬件控制链。
+- PySide6 是唯一的新界面，直接绑定与 UI 框架无关的统一 Workflow；曝光、相机图像、测量、重建和聚焦对所有 Profile 使用同一条代码路径。
+- `ProfileSpec` 只保存尺寸、默认曝光、能力和策略标识；`bootstrap` 作为组合根，将端口的具体实现注入 Workflow。
+- 经过实验使用的 PySpin/JUOPT 触发与采集顺序保留在兼容适配器之后；旧 `run_calibration.py` 和 Tk 入口仍可用于硬件回退对照。
+- 26×26 的 I0/I90 不再维护相机/DMD/GUI 副本；160×120 在迁移编码器策略期间由适配器隔离遗留全局常量。
+- 架构边界、扩展规则和测试策略见 [模块化架构](docs/ARCHITECTURE.md)。
 - 项目当前未附带开源许可证；公开发布前请由代码所有者选择许可证。
