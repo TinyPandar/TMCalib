@@ -890,6 +890,43 @@ class DMDController:
             raise ValueError("TM row contains NaN or infinity")
         return np.exp(-1j * np.angle(field)).astype(np.complex64, copy=False)
 
+    @staticmethod
+    def _target_and_background_intensities(
+        captured_image,
+        target_x,
+        target_y,
+    ):
+        """Return the 3x3 target maximum and mean outside that region."""
+        captured_image = np.asarray(captured_image)
+        if captured_image.ndim != 2:
+            raise ValueError("Focus intensity analysis requires a 2-D image")
+
+        image_h, image_w = captured_image.shape
+        target_x = int(target_x)
+        target_y = int(target_y)
+        if not 0 <= target_x < image_w or not 0 <= target_y < image_h:
+            raise ValueError(
+                "Target ({}, {}) is outside image {}x{}".format(
+                    target_x, target_y, image_w, image_h
+                )
+            )
+
+        y0 = max(0, target_y - 1)
+        y1 = min(image_h, target_y + 2)
+        x0 = max(0, target_x - 1)
+        x1 = min(image_w, target_x + 2)
+        target_intensity = float(np.max(captured_image[y0:y1, x0:x1]))
+
+        background_mask = np.ones(captured_image.shape, dtype=bool)
+        background_mask[y0:y1, x0:x1] = False
+        background_pixels = captured_image[background_mask]
+        background_intensity = (
+            float(np.mean(background_pixels))
+            if background_pixels.size
+            else float(np.mean(captured_image))
+        )
+        return target_intensity, background_intensity
+
     def _build_focus_hologram_batch(
         self,
         tm_rows,
@@ -899,7 +936,7 @@ class DMDController:
         encode_chunk_size=32,
         progress_callback=None,
     ):
-        """Encode 128-grid TM rows in vectorized CPU/GPU chunks."""
+        """Encode aligned integer-macro-pixel TM rows in CPU/GPU chunks."""
         tm_rows = np.asarray(tm_rows)
         expected_input_count = self.dmd_height * self.dmd_width
         if tm_rows.ndim != 2 or tm_rows.shape[1] != expected_input_count:
@@ -929,7 +966,7 @@ class DMDController:
             ds_method == "mean"
             and n_sp * n_sp == combination_length
             and int(px) == n_sp
-            and self.pixel_group_size == n_sp
+            and self.pixel_group_size % n_sp == 0
             and self.dmd_height * self.pixel_group_size
             == self.active_height
             and self.dmd_width * self.pixel_group_size
@@ -1008,8 +1045,11 @@ class DMDController:
         )
         lut = np.asarray(lut)
         lut_zero = len(lut) // 2
+        repeats_per_input = self.pixel_group_size // n_sp
+        downsampled_height = self.dmd_height * repeats_per_input
+        downsampled_width = self.dmd_width * repeats_per_input
         row_shifts = (
-            n_sp * np.arange(self.dmd_height, dtype=np.intp)
+            n_sp * np.arange(downsampled_height, dtype=np.intp)
         ) % (n_sp**2)
         roll_indices = (
             np.arange(n_sp**2, dtype=np.intp)[None, :]
@@ -1043,9 +1083,14 @@ class DMDController:
                 ).astype(np.complex64, copy=False)
                 field_max = np.max(np.abs(fields), axis=(1, 2))
                 fields /= field_max[:, None, None]
-                downsampled = np.zeros_like(fields)
+                repeated = np.repeat(
+                    np.repeat(fields, repeats_per_input, axis=1),
+                    repeats_per_input,
+                    axis=2,
+                )
+                downsampled = np.zeros_like(repeated)
                 for _ in range(n_sp**2):
-                    downsampled += fields
+                    downsampled += repeated
                 downsampled /= n_sp**2
                 downsampled_max = np.max(
                     np.abs(downsampled), axis=(1, 2)
@@ -1068,8 +1113,8 @@ class DMDController:
                 active_holograms = (
                     rolled.reshape(
                         len(valid_local_indices),
-                        self.dmd_height,
-                        self.dmd_width,
+                        downsampled_height,
+                        downsampled_width,
                         n_sp,
                         n_sp,
                     )
@@ -1102,7 +1147,7 @@ class DMDController:
         progress_callback=None,
         device_index=0,
     ):
-        """CUDA encoder for the centred 512 x 512 active hologram."""
+        """CUDA encoder for aligned integer-macro-pixel holograms."""
         tm_rows = np.asarray(tm_rows)
         batch_count = int(tm_rows.shape[0])
         patterns = np.zeros(
@@ -1120,6 +1165,9 @@ class DMDController:
             )
         device = torch.device("cuda:{}".format(device_index))
         encode_chunk_size = max(1, int(encode_chunk_size))
+        repeats_per_input = self.pixel_group_size // n_sp
+        downsampled_height = self.dmd_height * repeats_per_input
+        downsampled_width = self.dmd_width * repeats_per_input
 
         tensor_cache = getattr(self, "_focus_gpu_tensor_cache", None)
         if tensor_cache is None:
@@ -1128,8 +1176,8 @@ class DMDController:
         cache_key = (
             device_index,
             int(n_sp),
-            self.dmd_height,
-            self.dmd_width,
+            downsampled_height,
+            downsampled_width,
         )
         cached = tensor_cache.get(cache_key)
         if cached is None:
@@ -1146,7 +1194,7 @@ class DMDController:
             row_shifts = (
                 n_sp
                 * torch.arange(
-                    self.dmd_height,
+                    downsampled_height,
                     device=device,
                     dtype=torch.long,
                 )
@@ -1203,9 +1251,19 @@ class DMDController:
                         torch.abs(fields), dim=(1, 2)
                     )
                     fields /= field_max[:, None, None]
-                    downsampled = torch.zeros_like(fields)
+                    repeated = torch.repeat_interleave(
+                        fields,
+                        repeats_per_input,
+                        dim=1,
+                    )
+                    repeated = torch.repeat_interleave(
+                        repeated,
+                        repeats_per_input,
+                        dim=2,
+                    )
+                    downsampled = torch.zeros_like(repeated)
                     for _ in range(n_sp**2):
-                        downsampled += fields
+                        downsampled += repeated
                     downsampled /= n_sp**2
                     downsampled_max = torch.amax(
                         torch.abs(downsampled), dim=(1, 2)
@@ -1226,8 +1284,8 @@ class DMDController:
                     ]
                     expanded_roll_indices = roll_indices.expand(
                         len(valid_local_indices),
-                        self.dmd_height,
-                        self.dmd_width,
+                        downsampled_height,
+                        downsampled_width,
                         n_sp**2,
                     )
                     rolled = torch.gather(
@@ -1236,8 +1294,8 @@ class DMDController:
                     active_holograms = (
                         rolled.reshape(
                             len(valid_local_indices),
-                            self.dmd_height,
-                            self.dmd_width,
+                            downsampled_height,
+                            downsampled_width,
                             n_sp,
                             n_sp,
                         )
@@ -2824,25 +2882,20 @@ class DMDController:
 
             target_x = int(target_x)
             target_y = int(target_y)
-            target_intensity = float(captured_image[target_y, target_x])
+            (
+                target_intensity,
+                background_intensity,
+            ) = self._target_and_background_intensities(
+                captured_image,
+                target_x,
+                target_y,
+            )
             peak_flat_index = int(np.argmax(captured_image))
             peak_y, peak_x = np.unravel_index(
                 peak_flat_index, captured_image.shape
             )
             peak_intensity = float(captured_image[peak_y, peak_x])
 
-            # Estimate the speckle background outside a 5x5 box around the
-            # requested focus. The reported PBR is target/background, so a
-            # bright peak elsewhere cannot masquerade as successful focusing.
-            background_mask = np.ones(captured_image.shape, dtype=bool)
-            y0 = max(0, target_y - 2)
-            y1 = min(roi_h, target_y + 3)
-            x0 = max(0, target_x - 2)
-            x1 = min(roi_w, target_x + 3)
-            background_mask[y0:y1, x0:x1] = False
-            background_intensity = float(
-                np.mean(captured_image[background_mask])
-            )
             mean_intensity = float(np.mean(captured_image))
             pbr = (
                 target_intensity / background_intensity
@@ -3014,7 +3067,14 @@ class DMDController:
                 )
             )
 
-        target_intensity = float(captured_image[target_y, target_x])
+        (
+            target_intensity,
+            background_intensity,
+        ) = self._target_and_background_intensities(
+            captured_image,
+            target_x,
+            target_y,
+        )
         peak_flat_index = int(np.argmax(captured_image))
         peak_y, peak_x = np.unravel_index(
             peak_flat_index, captured_image.shape
@@ -3025,17 +3085,6 @@ class DMDController:
         image_intensity_range = image_max_intensity - image_min_intensity
         peak_distance = float(
             math.hypot(int(peak_x) - target_x, int(peak_y) - target_y)
-        )
-        background_mask = np.ones(captured_image.shape, dtype=bool)
-        background_mask[
-            max(0, target_y - 2):min(roi_h, target_y + 3),
-            max(0, target_x - 2):min(roi_w, target_x + 3),
-        ] = False
-        background_pixels = captured_image[background_mask]
-        background_intensity = (
-            float(np.mean(background_pixels))
-            if background_pixels.size
-            else float(np.mean(captured_image))
         )
         pbr = (
             target_intensity / background_intensity
@@ -3206,7 +3255,14 @@ class DMDController:
                     )
                 )
 
-            target_intensity = float(captured_image[target_y, target_x])
+            (
+                target_intensity,
+                background_intensity,
+            ) = self._target_and_background_intensities(
+                captured_image,
+                target_x,
+                target_y,
+            )
             peak_flat_index = int(np.argmax(captured_image))
             peak_y, peak_x = np.unravel_index(
                 peak_flat_index, captured_image.shape
@@ -3217,14 +3273,6 @@ class DMDController:
             image_intensity_range = image_max_intensity - image_min_intensity
             peak_distance = float(
                 math.hypot(int(peak_x) - target_x, int(peak_y) - target_y)
-            )
-            background_mask = np.ones(captured_image.shape, dtype=bool)
-            background_mask[
-                max(0, target_y - 2) : min(roi_h, target_y + 3),
-                max(0, target_x - 2) : min(roi_w, target_x + 3),
-            ] = False
-            background_intensity = float(
-                np.mean(captured_image[background_mask])
             )
             pbr = (
                 target_intensity / background_intensity

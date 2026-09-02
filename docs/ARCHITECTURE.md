@@ -14,6 +14,18 @@ flowchart TD
     PS --> A
 ```
 
+## Configuration dimensions
+
+- Input grids: 32×24, 128×96, 160×120, or 128×128.
+- DMD mappings: full 1024×768 aligned repeat, nearest-fill expansion, or a central 512×512 active region.
+- Camera outputs: 128×128 or 26×26.
+- Polarization channels: I0 or I90.
+- Pattern sets: 64-frame optical test, 4N, or 8N.
+- Reconstruction: ordinary pseudoinverse, Cholesky, or planar-complex32 low-precision inverse.
+
+Stable identifiers remain defined in `calibration_profiles.py`. Output names must
+include the input Profile, pattern set, and polarization channel where relevant.
+
 ## Dependency direction
 
 `tmcalib.workflow` depends only on Protocol interfaces from `tmcalib.ports`.
@@ -31,6 +43,19 @@ chooses an implementation.
 | `tmcalib.adapters` | Translate ports to existing hardware controllers | legacy scripts and vendor SDKs |
 | legacy scripts | Experiment-tested acquisition and trigger sequences | vendor SDKs and algorithms |
 
+## 128×96 full-field mapping
+
+`fourfold_128x96` uses a 128×96 logical input. Each input maps to an aligned
+8×8 DMD macro-pixel: samples are repeated twice on both axes to form a 256×192
+optical grid and then encoded with 4×4 `holo_SP` tiles. All 1024×768 mirrors are
+active, with metadata contract `aligned_repeat2_128x96_to_256x192_v1`.
+
+## 160×120 full-field mapping
+
+`fivefold_160x120` expands its 160×120 source to the 256×192 optical grid with
+center-aligned nearest-neighbor indices before 4×4 tile encoding. Its metadata
+contract is `nearest_fill_160x120_to_256x192_v1`.
+
 ## Unified feature contract
 
 Every Profile currently exposes the same baseline capabilities:
@@ -43,6 +68,10 @@ Every Profile currently exposes the same baseline capabilities:
 Optional features such as polarization selection, one-click calibration, and
 remote reconstruction are declared as capabilities. The GUI reads that data to
 enable controls. It does not switch on filenames or import a Profile-specific UI.
+
+The 128×96 and 160×120 configurations reuse the shared 128×128-output camera,
+acquisition, reconstruction, and focusing implementation through thin mapping
+layers. The 26×26 I0/I90 variants likewise share the configurable core.
 
 To add a feature that must exist for every configuration:
 
@@ -82,4 +111,3 @@ widget is touched.
 The dependency-injection tests use one `FakeHardware` object for every port. They
 verify the shared workflow, profile capability contract, one-click ordering,
 focus bounds, and lazy vendor imports without requiring a camera or DMD.
-

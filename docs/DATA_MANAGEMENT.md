@@ -16,7 +16,10 @@ Git 只保存源码、测试、Notebook 和文档。以下内容由 `.gitignore`
 | --- | --- | ---: | ---: | ---: |
 | 128×128，8N | 128×128 | 约 112 GiB | 4 GiB | 2 GiB |
 | 128×128，8N | 26×26 | 共用上行数据 | 169 MiB | 84.5 MiB |
+| 128×96，8N | 128×128 | 81 GiB | 3 GiB | 1.5 GiB |
 | 160×120，8N | 128×128 | 134.5 GiB | 4.69 GiB | 2.34 GiB |
+
+128×96 Profile 包含 98,304 个 Probe。每个输入对应一个 8×8 DMD 宏像素，Pattern 逐帧覆盖完整 1024×768 DMD；Pattern 数组为 72 GiB，complex64 Probe 为 9 GiB。
 
 160×120 Profile 包含 153,600 个 Probe。其 Pattern 逐帧覆盖完整 1024×768 DMD，单独 Pattern 数组约 112.5 GiB；complex64 Probe 约 22.0 GiB。生成、测量和重建放在同一磁盘时，还需为测量、TM、缓存和临时文件预留额外空间。
 
