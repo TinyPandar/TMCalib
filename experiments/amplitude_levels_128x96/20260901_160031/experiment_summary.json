@@ -1,0 +1,11 @@
+{
+  "level_count": 41,
+  "repeat_count": 10,
+  "distinguishability_z_threshold": 3.0,
+  "lowest_amplitude_distinguishable_from_zero": 0.025,
+  "adjacent_distinguishable_transition_count": 15,
+  "monotonic_violation_count": 18,
+  "amplitude_rmse": 0.14453780992339346,
+  "intensity_power_law_exponent": 1.0641642059108163,
+  "maximum_saturated_fraction": 0.0
+}

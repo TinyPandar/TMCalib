@@ -39,6 +39,7 @@ class QtEventBridge(QObject):
     """Marshal framework-neutral workflow events onto Qt's GUI thread."""
 
     event_received = Signal(object)
+    switch_finished = Signal(object)
 
 
 class MainWindow(QMainWindow):
@@ -48,7 +49,9 @@ class MainWindow(QMainWindow):
         self._unsubscribers: List = []
         self._bridge = QtEventBridge(self)
         self._bridge.event_received.connect(self._handle_event)
+        self._bridge.switch_finished.connect(self._finish_configuration_switch)
         self._last_frame: Optional[np.ndarray] = None
+        self._configuration_switching = False
 
         self.setWindowTitle("TMCalib 传输矩阵标定平台")
         self.setMinimumSize(1100, 720)
@@ -170,11 +173,14 @@ class MainWindow(QMainWindow):
         self.measure_button.clicked.connect(lambda: self._run("measure"))
         self.reconstruct_button = QPushButton("2. 恢复传输矩阵")
         self.reconstruct_button.clicked.connect(lambda: self._run("reconstruct"))
+        self.pixelwise_button = QPushButton("3. 逐点聚焦")
+        self.pixelwise_button.clicked.connect(lambda: self._run("pixelwise_report"))
         self.one_click_button = QPushButton("一键：测量 → 恢复 → 逐点报告")
         self.one_click_button.clicked.connect(lambda: self._run("one_click"))
         workflow_layout.addWidget(self.measure_button, 0, 0)
         workflow_layout.addWidget(self.reconstruct_button, 0, 1)
-        workflow_layout.addWidget(self.one_click_button, 1, 0, 1, 2)
+        workflow_layout.addWidget(self.pixelwise_button, 1, 0, 1, 2)
+        workflow_layout.addWidget(self.one_click_button, 2, 0, 1, 2)
         layout.addWidget(workflow_group)
 
         focus_group = QGroupBox("共轭聚焦")
@@ -246,10 +252,26 @@ class MainWindow(QMainWindow):
         profile = get_profile(self._selected_profile_key())
         return self.channel_combo.currentText() if profile.available_channels else None
 
+    @staticmethod
+    def _profile_identity(profile) -> tuple:
+        channel = profile.default_channel if profile.available_channels else None
+        return profile.key, channel
+
+    def _configuration_is_switchable(self) -> bool:
+        return not self._configuration_switching and (
+            self.workflow is None or self.workflow.state in (
+                WorkflowState.DISCONNECTED,
+                WorkflowState.IDLE,
+                WorkflowState.ERROR,
+                WorkflowState.CLOSED,
+            )
+        )
+
     def _profile_changed(self) -> None:
         profile = get_profile(self._selected_profile_key(), self._selected_channel())
+        switchable = self._configuration_is_switchable()
         self.channel_combo.setEnabled(
-            bool(profile.available_channels) and self.workflow is None
+            bool(profile.available_channels) and switchable
         )
         self.profile_summary.setText(format_profile_summary(profile.key))
         self.profile_status.setText(profile.display_name)
@@ -261,6 +283,20 @@ class MainWindow(QMainWindow):
         self.focus_y.setValue(roi_h // 2)
         self._apply_capabilities(profile)
 
+        # Profile modules specialize dimensions and encoder globals in the
+        # shared hardware backend. Switching therefore performs a controlled
+        # disconnect/reload/reconnect instead of mutating a live controller.
+        if (
+            self.workflow is not None
+            and switchable
+            and self._profile_identity(self.workflow.profile)
+            != self._profile_identity(profile)
+        ):
+            self._append_log(
+                "Switching configuration to {}...".format(profile.display_name)
+            )
+            self._switch_configuration()
+
     def _apply_capabilities(self, profile) -> None:
         connected = self.workflow is not None and self.workflow.state == WorkflowState.IDLE
         self.apply_exposure_button.setEnabled(connected and profile.supports("exposure"))
@@ -268,6 +304,9 @@ class MainWindow(QMainWindow):
         self.measure_button.setEnabled(connected and profile.supports("measurement"))
         self.reconstruct_button.setEnabled(connected and profile.supports("reconstruction"))
         self.focus_button.setEnabled(connected and profile.supports("focus"))
+        self.pixelwise_button.setEnabled(
+            connected and profile.supports("pixelwise_report")
+        )
         self.one_click_button.setEnabled(connected and profile.supports("one_click"))
 
     def _subscribe_workflow(self, workflow: CalibrationWorkflow) -> None:
@@ -277,6 +316,10 @@ class MainWindow(QMainWindow):
         ]
 
     def _disconnect_workflow(self) -> None:
+        if self.preview_button.isChecked():
+            # Let the normal toggle handler stop the old preview before its
+            # callbacks and hardware objects are released.
+            self.preview_button.setChecked(False)
         for unsubscribe in self._unsubscribers:
             unsubscribe()
         self._unsubscribers = []
@@ -284,9 +327,72 @@ class MainWindow(QMainWindow):
             self.workflow.close()
         self.workflow = None
 
+    def _detach_workflow(self) -> Optional[CalibrationWorkflow]:
+        """Detach event delivery while retaining the workflow for async close."""
+        for unsubscribe in self._unsubscribers:
+            unsubscribe()
+        self._unsubscribers = []
+        workflow = self.workflow
+        self.workflow = None
+        return workflow
+
+    def _reset_preview_control(self) -> None:
+        was_blocked = self.preview_button.blockSignals(True)
+        self.preview_button.setChecked(False)
+        self.preview_button.blockSignals(was_blocked)
+        self.preview_button.setText("启用图像预览")
+
+    def _switch_configuration(self) -> None:
+        """Release the old backend asynchronously, then connect the selection."""
+        if self.workflow is None or self._configuration_switching:
+            return
+        if self.workflow.state not in (WorkflowState.IDLE, WorkflowState.ERROR):
+            return
+
+        self._configuration_switching = True
+        self._reset_preview_control()
+        old_workflow = self._detach_workflow()
+        self.status_label.setText("switching")
+        self.operation_status.setText("正在释放旧配置...")
+        self.connect_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self.profile_combo.setEnabled(False)
+        self.channel_combo.setEnabled(False)
+        self._apply_capabilities(
+            get_profile(self._selected_profile_key(), self._selected_channel())
+        )
+
+        try:
+            future = old_workflow.disconnect()
+        except Exception as exc:
+            self._configuration_switching = False
+            self._show_error(str(exc))
+            self._refresh_for_state(WorkflowState.DISCONNECTED)
+            return
+
+        future.add_done_callback(
+            lambda completed: self._bridge.switch_finished.emit(completed)
+        )
+
+    def _finish_configuration_switch(self, future) -> None:
+        """Continue a hot switch on Qt's thread after SDK cleanup completes."""
+        try:
+            future.result()
+        except Exception as exc:
+            self._configuration_switching = False
+            self._append_log("Configuration switch failed: {}".format(exc))
+            self._show_error(str(exc))
+            self._refresh_for_state(WorkflowState.DISCONNECTED)
+            return
+
+        self._configuration_switching = False
+        self._append_log("Old configuration released; connecting new profile")
+        self._connect_hardware()
+
     def _connect_hardware(self) -> None:
         if self.workflow is not None:
-            self._disconnect_workflow()
+            self._switch_configuration()
+            return
         try:
             workflow = build_workflow(
                 self._selected_profile_key(), self._selected_channel()
@@ -371,8 +477,12 @@ class MainWindow(QMainWindow):
         self.device_status.setText("已连接" if state == WorkflowState.IDLE else state.value)
         self.connect_button.setEnabled(not busy)
         self.stop_button.setEnabled(busy)
-        self.profile_combo.setEnabled(self.workflow is None)
         profile = get_profile(self._selected_profile_key(), self._selected_channel())
+        switchable = self._configuration_is_switchable()
+        self.profile_combo.setEnabled(switchable)
+        self.channel_combo.setEnabled(
+            switchable and bool(profile.available_channels)
+        )
         self._apply_capabilities(profile)
         if state == WorkflowState.IDLE:
             self.progress.setValue(0)

@@ -26,7 +26,11 @@ class CameraPort(Protocol):
 
 
 class MeasurementPort(Protocol):
-    def run_measurement(self, progress: ProgressCallback) -> OperationResult: ...
+    def run_measurement(
+        self,
+        progress: ProgressCallback,
+        frame_callback: Optional[FrameCallback] = None,
+    ) -> OperationResult: ...
     def stop_measurement(self) -> None: ...
 
 
@@ -37,7 +41,11 @@ class ReconstructionPort(Protocol):
 
 class FocusPort(Protocol):
     def focus(self, x: int, y: int) -> OperationResult: ...
-    def run_pixelwise_report(self, progress: ProgressCallback) -> OperationResult: ...
+    def run_pixelwise_report(
+        self,
+        progress: ProgressCallback,
+        frame_callback: Optional[FrameCallback] = None,
+    ) -> OperationResult: ...
 
 
 class LifecyclePort(Protocol):

@@ -58,7 +58,7 @@ PROFILES: Dict[str, ProfileSpec] = {
         input_macro_pixel_size=32,
         default_exposure_us=1500.0,
         capabilities=frozenset(
-            {"exposure", "preview", "measurement", "reconstruction", "focus", "remote_reconstruction"}
+            {"exposure", "preview", "measurement", "reconstruction", "focus", "pixelwise_report", "remote_reconstruction"}
         ),
         controller_module="calibrate_v4_32x24",
         camera_module="calibrate_v4_32x24",
@@ -75,11 +75,28 @@ PROFILES: Dict[str, ProfileSpec] = {
         input_macro_pixel_size=32,
         default_exposure_us=1500.0,
         capabilities=frozenset(
-            {"exposure", "preview", "measurement", "reconstruction", "focus"}
+            {"exposure", "preview", "measurement", "reconstruction", "focus", "pixelwise_report"}
         ),
         controller_module="calibrate_v4_32x24_cholesky",
         camera_module="calibrate_v4_32x24",
         encoder_key="coarse_32x24",
+        reconstructor_key="ggs21_cholesky",
+        default_channel="I90",
+    ),
+    "fourfold_128x96": ProfileSpec(
+        key="fourfold_128x96",
+        display_name="128 x 96 full-field measurement",
+        input_shape=(96, 128),
+        camera_roi=(128, 128),
+        active_shape=(768, 1024),
+        input_macro_pixel_size=8,
+        default_exposure_us=60.0,
+        capabilities=frozenset(
+            {"exposure", "preview", "measurement", "reconstruction", "focus", "pixelwise_report", "one_click"}
+        ),
+        controller_module="calibrate_128x96",
+        camera_module="calibrate_128x128",
+        encoder_key="aligned_repeat2_128x96",
         reconstructor_key="ggs21_cholesky",
         default_channel="I90",
     ),
@@ -92,7 +109,7 @@ PROFILES: Dict[str, ProfileSpec] = {
         input_macro_pixel_size=4,
         default_exposure_us=60.0,
         capabilities=frozenset(
-            {"exposure", "preview", "measurement", "reconstruction", "focus", "one_click"}
+            {"exposure", "preview", "measurement", "reconstruction", "focus", "pixelwise_report", "one_click"}
         ),
         controller_module="calibrate_160x120",
         camera_module="calibrate_128x128",
@@ -109,7 +126,7 @@ PROFILES: Dict[str, ProfileSpec] = {
         input_macro_pixel_size=4,
         default_exposure_us=60.0,
         capabilities=frozenset(
-            {"exposure", "preview", "measurement", "reconstruction", "focus", "one_click", "partial_tm", "test64"}
+            {"exposure", "preview", "measurement", "reconstruction", "focus", "pixelwise_report", "one_click", "partial_tm", "test64"}
         ),
         controller_module="calibrate_128x128",
         camera_module="calibrate_128x128",
@@ -126,7 +143,7 @@ PROFILES: Dict[str, ProfileSpec] = {
         input_macro_pixel_size=4,
         default_exposure_us=1500.0,
         capabilities=frozenset(
-            {"exposure", "preview", "measurement", "reconstruction", "focus", "one_click", "partial_tm", "test64", "polarization"}
+            {"exposure", "preview", "measurement", "reconstruction", "focus", "pixelwise_report", "one_click", "partial_tm", "test64", "polarization"}
         ),
         controller_module="calibrate_128x128",
         camera_module="calibrate_128x128",

@@ -56,8 +56,11 @@ PATTERN_160X120_CONFIG = {
 }
 
 
-def get_active_160x120_pattern_config():
+def get_active_160x120_pattern_config(output_tag=None):
     """Return and validate the selected 160 x 120 pattern dataset."""
+    # Match the shared get_active_128_pattern_config(output_tag=None)
+    # provider signature. Full-field profiles are not channelized.
+    del output_tag
     active = PATTERN_160X120_CONFIG.get("active")
     datasets = PATTERN_160X120_CONFIG.get("sets", {})
     if active not in datasets:

@@ -1,0 +1,1805 @@
+import tkinter as tk
+from tkinter import ttk
+import PySpin
+import threading
+import queue
+import time
+import numpy as np
+from scipy.stats import pearsonr
+from ctypes import *
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from datetime import datetime
+import matplotlib.dates as mdates
+import warnings
+import os
+import multiprocessing as mp
+from multiprocessing import Queue as MPQueue, Process
+
+warnings.filterwarnings('ignore')
+
+# Shared DMD/camera timing. At 500 Hz each frame lasts 2000 us; a 1500 us
+# exposure leaves about 500 us for sensor readout and trigger timing margin.
+TARGET_ACQUISITION_FPS = 500.0
+CAMERA_EXPOSURE_US = 1500.0
+
+# =============================================================================
+# Numba 加速全息图生成
+# =============================================================================
+try:
+    from numba import njit
+    print("[Numba] JIT 已启用，全息图生成将使用加速版本")
+    USE_NUMBA = True
+except ImportError:
+    print("[Numba] 未安装，将使用原始 dmd_holograms.holo_SP")
+    USE_NUMBA = False
+
+if USE_NUMBA:
+    @njit
+    def _holo_SP_numba(field, step, lut, pixel_combinations, ds_method):
+        m_SP = pixel_combinations.shape[1]
+        n_SP = int(np.sqrt(m_SP))
+        H, W = field.shape
+        H_ds = H // n_SP
+        W_ds = W // n_SP
+        ds = np.zeros((H_ds, W_ds), dtype=np.complex128)
+        if ds_method == 'mean':
+            for j in range(H_ds):
+                for i in range(W_ds):
+                    block = field[j*n_SP:(j+1)*n_SP, i*n_SP:(i+1)*n_SP]
+                    ds[j, i] = np.mean(block)
+        elif ds_method == 'center':
+            for j in range(H_ds):
+                for i in range(W_ds):
+                    ds[j, i] = field[j*n_SP + n_SP//2, i*n_SP + n_SP//2]
+        elif ds_method == 'side':
+            for j in range(H_ds):
+                for i in range(W_ds):
+                    ds[j, i] = field[j*n_SP, i*n_SP]
+
+        max_abs_ds = np.max(np.abs(ds))
+        if max_abs_ds == 0.0:
+            max_abs_ds = 1e-12
+        scale = 1.0 / (max_abs_ds * step)
+        reim0 = lut.shape[0] // 2
+
+        re = np.round(np.real(ds) * scale).astype(np.int32)
+        im = np.round(np.imag(ds) * scale).astype(np.int32)
+        re = np.clip(re, -reim0, reim0-1) + reim0
+        im = np.clip(im, -reim0, reim0-1) + reim0
+
+        sp_indices = np.empty_like(re)
+        for j in range(H_ds):
+            for i in range(W_ds):
+                sp_indices[j, i] = lut[re[j, i], im[j, i]]
+
+        holo = np.zeros((H_ds * n_SP, W_ds * n_SP), dtype=np.uint8)
+        for j in range(H_ds):
+            shift = (n_SP * j) % m_SP
+            for i in range(W_ds):
+                idx = sp_indices[j, i]
+                pattern = pixel_combinations[idx].copy()
+                rolled = np.empty_like(pattern)
+                for k in range(len(pattern)):
+                    rolled[k] = pattern[(k + shift) % len(pattern)]
+                block = rolled.reshape((n_SP, n_SP)).T
+                holo[j*n_SP:(j+1)*n_SP, i*n_SP:(i+1)*n_SP] = block
+        return holo
+
+# =============================================================================
+# 原始全息图生成模块（备用）
+# =============================================================================
+try:
+    from holograms.generate_LUT import generate_lut
+    from holograms.dmd_holograms import holo_SP as holo_SP_original
+    HOLO_ORIGINAL_AVAILABLE = True
+except ImportError:
+    HOLO_ORIGINAL_AVAILABLE = False
+    print("[Warning] dmd_holograms 或 generate_LUT 未找到")
+
+# 纯 NumPy 极简 fallback
+def _holo_SP_numpy_fallback(field, step, lut, pixel_combinations, ds_method):
+    m_SP = pixel_combinations.shape[1]
+    n_SP = int(np.sqrt(m_SP))
+    H, W = field.shape
+    H_ds = H // n_SP
+    W_ds = W // n_SP
+    
+    if ds_method == 'mean':
+        ds = np.array([
+            [np.mean(field[j*n_SP:(j+1)*n_SP, i*n_SP:(i+1)*n_SP]) 
+             for i in range(W_ds)] 
+            for j in range(H_ds)
+        ], dtype=np.complex128)
+    elif ds_method == 'center':
+        ds = field[n_SP//2::n_SP, n_SP//2::n_SP][:H_ds, :W_ds]
+    else:
+        ds = field[::n_SP, ::n_SP][:H_ds, :W_ds]
+    
+    max_abs_ds = np.max(np.abs(ds))
+    if max_abs_ds == 0.0:
+        max_abs_ds = 1e-12
+    scale = 1.0 / (max_abs_ds * step)
+    reim0 = lut.shape[0] // 2
+    
+    re = np.clip(np.round(np.real(ds) * scale).astype(np.int32), -reim0, reim0-1) + reim0
+    im = np.clip(np.round(np.imag(ds) * scale).astype(np.int32), -reim0, reim0-1) + reim0
+    
+    sp_indices = lut[re, im]
+    
+    holo = np.zeros((H_ds * n_SP, W_ds * n_SP), dtype=np.uint8)
+    for j in range(H_ds):
+        shift = (n_SP * j) % m_SP
+        for i in range(W_ds):
+            idx = sp_indices[j, i]
+            pattern = np.roll(pixel_combinations[idx], -shift)
+            block = pattern.reshape((n_SP, n_SP)).T
+            holo[j*n_SP:(j+1)*n_SP, i*n_SP:(i+1)*n_SP] = block
+    return holo
+
+
+# =============================================================================
+# 绘图子进程（独立进程，利用另一个核）
+# =============================================================================
+def plot_worker(data_queue, cmd_queue):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    
+    fig = plt.figure(figsize=(16, 14))
+    gs = gridspec.GridSpec(4, 2, figure=fig, width_ratios=[1, 1.5], height_ratios=[1, 1, 1, 1])
+    
+    ax1 = fig.add_subplot(gs[:, 0])
+    ax1.set_title("Current Camera Image (ROI)")
+    ax1.axis('off')
+    img_display = ax1.imshow(np.zeros((100, 100)), cmap='gray')
+    
+    ax2 = fig.add_subplot(gs[0, 1])
+    # 标题已移至左侧总标题，此处不显示
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylabel("PBR Value", color='b')
+    ax2.tick_params(axis='y', labelcolor='b')
+    ax2.grid(True)
+    pbr_line, = ax2.plot([], [], 'b-', label='PBR')
+    ax2.legend(loc='upper left')
+    
+    ax2_corr = fig.add_subplot(gs[1, 1])
+    # 标题已移至左侧总标题，此处不显示
+    ax2_corr.set_xlabel("Time (s)")
+    ax2_corr.set_ylabel("Pearson r", color='r')
+    ax2_corr.tick_params(axis='y', labelcolor='r')
+    ax2_corr.grid(True)
+    corr_line, = ax2_corr.plot([], [], 'r-', label='Correlation')
+    ax2_corr.legend(loc='upper left')
+    
+    ax3 = fig.add_subplot(gs[2, 1])
+    # 标题已移至左侧总标题，此处不显示
+    ax3.set_xlabel("Time (s)")
+    ax3.set_ylabel("Error Rate r", color='g')
+    ax3.tick_params(axis='y', labelcolor='g')
+    ax3.grid(True)
+    r_line, = ax3.plot([], [], 'g-', label='Error Rate r')
+    ax3.legend(loc='upper left')
+    
+    ax3_mut = fig.add_subplot(gs[3, 1])
+    # 标题已移至左侧总标题，此处不显示
+    ax3_mut.set_xlabel("Time (s)")
+    ax3_mut.set_ylabel("Mutation Count", color='m')
+    ax3_mut.tick_params(axis='y', labelcolor='m')
+    ax3_mut.grid(True)
+    mut_line, = ax3_mut.plot([], [], 'm-', label='Mutation Count')
+    ax3_mut.legend(loc='upper left')
+    # 设置合理的默认范围，避免空数据时显示异常
+    ax3_mut.set_ylim(0, 100)
+    ax3_mut.set_xlim(0, 10)
+    
+    # 调整子图间距，减少因去掉标题留下的空白
+    plt.subplots_adjust(hspace=0.3, wspace=0.3)
+    plt.tight_layout()
+    
+    last_data = None
+    img_path = 'plot_output.png'
+    
+    while True:
+        try:
+            try:
+                cmd = cmd_queue.get_nowait()
+                if cmd == 'STOP':
+                    plt.close(fig)
+                    break
+            except:
+                pass
+            
+            try:
+                data = data_queue.get_nowait()
+            except:
+                time.sleep(0.05)
+                continue
+            
+            if data is None:
+                continue
+                
+            data_hash = hash(str(data.get('pbr_history', [])))
+            if last_data == data_hash:
+                continue
+            last_data = data_hash
+            
+            if 'camera_img' in data and data['camera_img'] is not None:
+                img_display.set_data(data['camera_img'])
+                vmin, vmax = data['camera_img'].min(), data['camera_img'].max()
+                img_display.set_clim(vmin=vmin, vmax=vmax)
+            
+            time_seconds = data.get('time_seconds', [])
+            
+            if 'pbr_history' in data and len(data['pbr_history']) > 0:
+                n = min(len(time_seconds), len(data['pbr_history']))
+                pbr_line.set_data(time_seconds[:n], data['pbr_history'][:n])
+                ax2.relim()
+                ax2.autoscale_view()
+            
+            if 'corr_history' in data and len(data['corr_history']) > 0:
+                corr_times = [time_seconds[i] if i < len(time_seconds) else time_seconds[-1] 
+                             for i in data.get('corr_iterations', [])]
+                n = min(len(corr_times), len(data['corr_history']))
+                if n > 0:
+                    corr_line.set_data(corr_times[:n], data['corr_history'][:n])
+                    ax2_corr.relim()
+                    ax2_corr.autoscale_view()
+            
+            if 'r_history' in data and len(data['r_history']) > 0:
+                r_times = [time_seconds[i] if i < len(time_seconds) else time_seconds[-1]
+                          for i in data.get('r_iterations', [])]
+                n = min(len(r_times), len(data['r_history']))
+                if n > 0:
+                    r_line.set_data(r_times[:n], data['r_history'][:n])
+                    ax3.relim()
+                    ax3.autoscale_view()
+            
+            if 'mut_history' in data and len(data['mut_history']) > 0:
+                mut_times = [time_seconds[i] if i < len(time_seconds) else time_seconds[-1]
+                            for i in data.get('mut_iterations', [])]
+                n = min(len(mut_times), len(data['mut_history']))
+                if n > 0:
+                    mut_line.set_data(mut_times[:n], data['mut_history'][:n])
+                    # 手动计算数据范围，避免 autoscale_view 异常
+                    y_vals = data['mut_history'][:n]
+                    y_min = 0
+                    y_max = max(y_vals) * 1.2 if max(y_vals) > 0 else 100
+                    y_max = max(y_max, 10)  # 至少留一些空间
+                    ax3_mut.set_ylim(y_min, y_max)
+                    # 手动计算 X 轴范围
+                    x_vals = mut_times[:n]
+                    if len(x_vals) > 1:
+                        x_min = min(x_vals)
+                        x_max = max(x_vals)
+                        ax3_mut.set_xlim(x_min, x_max + (x_max - x_min) * 0.1)
+                    elif len(x_vals) == 1:
+                        ax3_mut.set_xlim(0, x_vals[0] * 1.1 if x_vals[0] > 0 else 10)
+            
+            fig.savefig(img_path, dpi=80, bbox_inches='tight', pad_inches=0.1)
+            
+        except Exception as e:
+            print(f"[PlotWorker] 错误: {e}")
+            time.sleep(0.1)
+
+
+# =============================================================================
+# CameraHandler（PolarSens I90 偏振通道）
+# =============================================================================
+class CameraHandler:
+    def __init__(self, cam_index, save_path, trigger_enabled=True):
+        self.cam_index = cam_index
+        self.save_path = save_path
+        self.is_running = True
+        self.image_queue = queue.Queue(maxsize=1)
+        self.system = None
+        self.cam_list = None
+        self.cam = None
+        self.pattern_lock = threading.Lock()
+        self.current_pattern_index = 0
+        # Polarized8 is the native camera output. Keep the measured values in
+        # their native 8-bit range; scaling to 12-bit creates no extra detail.
+        self.convert_to_12bit = False
+        self.trigger_enabled = trigger_enabled
+        self.last_error_time = 0
+        self.trigger_ready = threading.Event()
+        
+        self.roi_x = 296
+        self.roi_y = 206
+        self.roi_width = 128
+        self.roi_height = 128
+        self.raw_roi_x = None
+        self.raw_roi_y = None
+        self.polarization_quadrant = (
+            PySpin.SPINNAKER_POLARIZATION_QUADRANT_I90
+        )
+
+        self.system = PySpin.System.GetInstance()
+        self.cam_list = self.system.GetCameras()
+            
+        if self.cam_list.GetSize() <= self.cam_index:
+            self.cam_list.Clear()
+            self.system.ReleaseInstance()
+            raise RuntimeError(f"Camera {cam_index} not found")
+            
+        self.cam = self.cam_list.GetByIndex(self.cam_index)
+        self.cam.Init()
+
+        # Select the raw polarization format before configuring the ROI. Some
+        # PolarSens firmware exposes IspEnable as read-only; Polarized8 itself
+        # is already the raw mosaic, so inability to write IspEnable is not a
+        # fatal error.
+        if not self.configure_format():
+            self.cleanup()
+            raise RuntimeError("无法将相机设置为 Polarized8")
+        self.configure_ISP(isp=False)
+        if not self.configure_roi():
+            self.cleanup()
+            raise RuntimeError("无法配置偏振相机 ROI")
+
+        if self.trigger_enabled:
+            self.configure_exposure(exposure_time=CAMERA_EXPOSURE_US)
+        else:
+            self.configure_exposure(exposure_time=6000.0)
+            
+        self.configure_gamma(gamma=1.0)
+        self.configure_gain(auto_gain='Off', gain=0)
+        self.configure_buffer_handling()
+        if self.trigger_enabled:
+            if not self.configure_trigger():
+                self.cleanup()
+                raise RuntimeError("无法配置相机硬件触发")
+
+    def configure_roi(self):
+        """Configure a 256x256 raw ROI that produces one 128x128 channel."""
+        if not self.cam:
+            return False
+        try:
+            if self.cam.IsStreaming():
+                self.cam.EndAcquisition()
+            nodemap = self.cam.GetNodeMap()
+            node_offset_x = PySpin.CIntegerPtr(nodemap.GetNode('OffsetX'))
+            node_offset_y = PySpin.CIntegerPtr(nodemap.GetNode('OffsetY'))
+            node_width = PySpin.CIntegerPtr(nodemap.GetNode('Width'))
+            node_height = PySpin.CIntegerPtr(nodemap.GetNode('Height'))
+            if not all([PySpin.IsAvailable(node) and PySpin.IsWritable(node) 
+                       for node in [node_offset_x, node_offset_y, node_width, node_height]]):
+                print("部分ROI参数不可用，将使用全分辨率")
+                return False
+
+            # Reset offsets before querying/setting the maximum usable size.
+            node_offset_x.SetValue(node_offset_x.GetMin())
+            node_offset_y.SetValue(node_offset_y.GetMin())
+            sensor_width = node_width.GetMax()
+            sensor_height = node_height.GetMax()
+            raw_width = self.roi_width * 2
+            raw_height = self.roi_height * 2
+            if raw_width > sensor_width or raw_height > sensor_height:
+                print(
+                    f"偏振ROI过大: raw={raw_width}x{raw_height}, "
+                    f"sensor={sensor_width}x{sensor_height}"
+                )
+                return False
+
+            node_width.SetValue(raw_width)
+            node_height.SetValue(raw_height)
+
+            def align_to_node(value, node):
+                minimum = node.GetMin()
+                increment = max(1, node.GetInc())
+                return minimum + ((value - minimum) // increment) * increment
+
+            raw_x = align_to_node(
+                (sensor_width - raw_width) // 2, node_offset_x
+            )
+            raw_y = align_to_node(
+                (sensor_height - raw_height) // 2, node_offset_y
+            )
+
+            # A 2x2 polarization cell must start at an even sensor coordinate.
+            if raw_x % 2:
+                raw_x = align_to_node(raw_x - 1, node_offset_x)
+            if raw_y % 2:
+                raw_y = align_to_node(raw_y - 1, node_offset_y)
+            if raw_x % 2 or raw_y % 2:
+                print(
+                    f"无法将偏振ROI对齐到偶数坐标: X={raw_x}, Y={raw_y}"
+                )
+                return False
+
+            node_offset_x.SetValue(raw_x)
+            node_offset_y.SetValue(raw_y)
+            self.raw_roi_x = raw_x
+            self.raw_roi_y = raw_y
+            # Coordinates after extracting one half-resolution quadrant.
+            self.roi_x = raw_x // 2
+            self.roi_y = raw_y // 2
+            print(
+                f"偏振ROI配置成功: raw X={raw_x}, Y={raw_y}, "
+                f"Width={raw_width}, Height={raw_height}; "
+                f"I90 output={self.roi_width}x{self.roi_height}"
+            )
+            return True
+        except PySpin.SpinnakerException as ex:
+            print(f'配置ROI错误: {ex}')
+            return False
+
+    def configure_trigger(self):
+        if not self.cam:
+            return False
+        try:
+            nodemap = self.cam.GetNodeMap()
+            node_trigger_mode = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerMode'))
+            if not PySpin.IsReadable(node_trigger_mode) or not PySpin.IsWritable(node_trigger_mode):
+                return False
+            node_trigger_mode_off = node_trigger_mode.GetEntryByName('Off')
+            node_trigger_mode.SetIntValue(node_trigger_mode_off.GetValue())
+            node_trigger_selector = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerSelector'))
+            node_trigger_selector_framestart = node_trigger_selector.GetEntryByName('FrameStart')
+            node_trigger_selector.SetIntValue(node_trigger_selector_framestart.GetValue())
+            node_trigger_source = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerSource'))
+            node_trigger_source_line0 = node_trigger_source.GetEntryByName('Line0')
+            if PySpin.IsReadable(node_trigger_source_line0):
+                node_trigger_source.SetIntValue(node_trigger_source_line0.GetValue())
+            else:
+                for line_name in ['Line1', 'Line2', 'Line3']:
+                    node_line = node_trigger_source.GetEntryByName(line_name)
+                    if PySpin.IsReadable(node_line):
+                        node_trigger_source.SetIntValue(node_line.GetValue())
+                        break
+
+            # Accept the next trigger while the preceding frame is being read
+            # out. This is required for reliable high-rate sequence capture.
+            node_trigger_overlap = PySpin.CEnumerationPtr(
+                nodemap.GetNode('TriggerOverlap')
+            )
+            if (
+                PySpin.IsReadable(node_trigger_overlap)
+                and PySpin.IsWritable(node_trigger_overlap)
+            ):
+                node_readout = node_trigger_overlap.GetEntryByName('ReadOut')
+                if PySpin.IsReadable(node_readout):
+                    node_trigger_overlap.SetIntValue(node_readout.GetValue())
+
+            node_trigger_activation = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerActivation'))
+            if PySpin.IsReadable(node_trigger_activation) and PySpin.IsWritable(node_trigger_activation):
+                node_rising = node_trigger_activation.GetEntryByName('RisingEdge')
+                if PySpin.IsReadable(node_rising):
+                    node_trigger_activation.SetIntValue(node_rising.GetValue())
+            node_trigger_mode_on = node_trigger_mode.GetEntryByName('On')
+            node_trigger_mode.SetIntValue(node_trigger_mode_on.GetValue())
+            node_acquisition_mode = PySpin.CEnumerationPtr(nodemap.GetNode('AcquisitionMode'))
+            node_acquisition_mode_continuous = node_acquisition_mode.GetEntryByName('Continuous')
+            node_acquisition_mode.SetIntValue(node_acquisition_mode_continuous.GetValue())
+            return True
+        except PySpin.SpinnakerException as ex:
+            print(f'配置触发错误: {ex}')
+            return False
+
+    def configure_exposure(self, exposure_time=CAMERA_EXPOSURE_US):
+        if not self.cam:
+            return False
+        try:
+            nodemap = self.cam.GetNodeMap()
+            node_exposure_auto = PySpin.CEnumerationPtr(nodemap.GetNode('ExposureAuto'))
+            node_exposure_auto_off = node_exposure_auto.GetEntryByName('Off')
+            node_exposure_auto.SetIntValue(node_exposure_auto_off.GetValue())
+            node_exposure_mode = PySpin.CEnumerationPtr(nodemap.GetNode('ExposureMode'))
+            node_timed = node_exposure_mode.GetEntryByName('Timed')
+            node_exposure_mode.SetIntValue(node_timed.GetValue())
+            node_exposure_time = PySpin.CFloatPtr(nodemap.GetNode('ExposureTime'))
+            node_exposure_time.SetValue(float(exposure_time))
+            actual_exposure = float(node_exposure_time.GetValue())
+            print(
+                f"曝光时间设置为 {actual_exposure:.1f} us "
+                f"(requested {float(exposure_time):.1f} us)"
+            )
+            return True
+        except PySpin.SpinnakerException as ex:
+            print(f'配置曝光错误: {ex}')
+            return False
+
+    def configure_gain(self, auto_gain='Off', gain=0):
+        if not self.cam:
+            return False
+        try:
+            nodemap = self.cam.GetNodeMap()
+            node_gain_auto = PySpin.CEnumerationPtr(nodemap.GetNode('GainAuto'))
+            node_gain_auto_off = node_gain_auto.GetEntryByName(auto_gain)
+            node_gain_auto.SetIntValue(node_gain_auto_off.GetValue())
+            node_gain_value = PySpin.CFloatPtr(nodemap.GetNode('Gain'))
+            node_gain_value.SetValue(gain)
+            return True
+        except PySpin.SpinnakerException as ex:
+            print(f'配置增益错误: {ex}')
+            return False
+
+    def configure_gamma(self, gamma_enable=True, gamma=1.0):
+        if not self.cam:
+            return False
+        try:
+            nodemap = self.cam.GetNodeMap()
+            node_gamma_enable = PySpin.CBooleanPtr(nodemap.GetNode('GammaEnable'))
+            node_gamma_enable.SetValue(gamma_enable)
+            node_gamma_value = PySpin.CFloatPtr(nodemap.GetNode('Gamma'))
+            node_gamma_value.SetValue(gamma)
+            return True
+        except PySpin.SpinnakerException as ex:
+            print(f'配置Gamma错误: {ex}')
+            return False
+
+    def configure_ISP(self, isp=True):
+        if not self.cam:
+            return False
+        try:
+            nodemap = self.cam.GetNodeMap()
+            node_isp_enable = PySpin.CBooleanPtr(nodemap.GetNode('IspEnable'))
+
+            if not PySpin.IsAvailable(node_isp_enable):
+                print('提示: 相机没有可用的 IspEnable 节点，保持 Polarized8 原始格式')
+                return True
+            if PySpin.IsReadable(node_isp_enable):
+                current_value = bool(node_isp_enable.GetValue())
+                if current_value == bool(isp):
+                    return True
+            if not PySpin.IsWritable(node_isp_enable):
+                print(
+                    '提示: IspEnable 节点只读；Polarized8 已是原始偏振格式，继续运行'
+                )
+                return True
+
+            node_isp_enable.SetValue(isp)
+            return True
+        except PySpin.SpinnakerException as ex:
+            # Polarized8 bypasses conventional ISP processing. Treat firmware
+            # that locks this optional node as a supported configuration.
+            print(f'提示: 无法修改 IspEnable，保持 Polarized8 并继续运行: {ex}')
+            return True
+
+    def configure_format(self):
+        """Request the raw polarization mosaic from a PolarSens camera."""
+        if not self.cam:
+            return False
+        try:
+            if not (
+                PySpin.IsAvailable(self.cam.PixelFormat)
+                and PySpin.IsWritable(self.cam.PixelFormat)
+            ):
+                return False
+            self.cam.PixelFormat.SetValue(PySpin.PixelFormat_Polarized8)
+            print('Pixel Format设置为PixelFormat_Polarized8')
+            return True
+        except PySpin.SpinnakerException as ex:
+            print(f'配置格式错误: {ex}')
+            return False
+
+    def configure_buffer_handling(self):
+        if not self.cam:
+            return False
+        try:
+            nodemap = self.cam.GetTLStreamNodeMap()
+            node_bufferhandling = PySpin.CEnumerationPtr(nodemap.GetNode('StreamBufferHandlingMode'))
+            if PySpin.IsAvailable(node_bufferhandling) and PySpin.IsWritable(node_bufferhandling):
+                node_oldestfirst = node_bufferhandling.GetEntryByName('OldestFirst')
+                if PySpin.IsAvailable(node_oldestfirst) and PySpin.IsReadable(node_oldestfirst):
+                    node_bufferhandling.SetIntValue(node_oldestfirst.GetValue())
+            return True
+        except PySpin.SpinnakerException as ex:
+            print(f'配置缓冲区处理错误: {ex}')
+            return False
+
+    def reset_trigger(self):
+        if not self.cam:
+            return False
+        try:
+            nodemap = self.cam.GetNodeMap()
+            node_trigger_mode = PySpin.CEnumerationPtr(nodemap.GetNode('TriggerMode'))
+            if not (
+                PySpin.IsReadable(node_trigger_mode)
+                and PySpin.IsWritable(node_trigger_mode)
+            ):
+                return False
+            node_trigger_mode_off = node_trigger_mode.GetEntryByName('Off')
+            if not PySpin.IsReadable(node_trigger_mode_off):
+                return False
+            node_trigger_mode.SetIntValue(node_trigger_mode_off.GetValue())
+            return True
+        except PySpin.SpinnakerException as ex:
+            print(f'重置触发错误: {ex}')
+            return False
+
+    def start(self):
+        self.cam.BeginAcquisition()
+
+    def run(self):
+        retries = 3
+        timeout_ms = 2000 if self.trigger_enabled else 20000
+        for attempt in range(1, retries + 1):
+            image_result = None
+            try:
+                image_result = self.cam.GetNextImage(timeout_ms)
+                if image_result.IsIncomplete():
+                    print(
+                        f"图像不完整，状态: {image_result.GetImageStatus()}"
+                    )
+                    continue
+
+                # Extract the top-left I90 pixels from every 2x2 PolarSens
+                # cell. A 256x256 raw ROI becomes a 128x128 intensity image.
+                polar_image = (
+                    PySpin.ImageUtilityPolarization.ExtractPolarQuadrant(
+                        image_result,
+                        self.polarization_quadrant,
+                    )
+                )
+                image_data = np.array(
+                    polar_image.GetNDArray(), dtype=np.uint8, copy=True
+                )
+                expected_shape = (self.roi_height, self.roi_width)
+                if image_data.shape != expected_shape:
+                    raise RuntimeError(
+                        f"偏振图像shape错误: {image_data.shape}, "
+                        f"expected {expected_shape}"
+                    )
+
+                if self.convert_to_12bit:
+                    image_converted = (
+                        image_data.astype(np.float32) / 255.0 * 4095.0
+                    ).astype(np.uint16)
+                else:
+                    image_converted = image_data
+                return image_converted
+            except Exception as ex:
+                current_time = time.time()
+                if current_time - self.last_error_time > 1:
+                    print(f'获取图像错误（尝试 {attempt}/{retries}）: {ex}')
+                    self.last_error_time = current_time
+            finally:
+                if image_result is not None:
+                    try:
+                        image_result.Release()
+                    except Exception:
+                        pass
+                time.sleep(0.001)
+        return None
+
+    def stop(self):
+        try:
+            if self.cam and self.cam.IsStreaming():
+                self.cam.EndAcquisition()
+        except Exception:
+            pass
+
+    def cleanup(self):
+        if self.cam:
+            try:
+                if self.cam.IsStreaming():
+                    self.cam.EndAcquisition()
+                self.reset_trigger()
+                self.cam.DeInit()
+            except:
+                pass
+            self.cam = None
+        if self.cam_list:
+            try:
+                self.cam_list.Clear()
+            except Exception:
+                pass
+            self.cam_list = None
+        if self.system:
+            self.system.ReleaseInstance()
+            self.system = None
+
+
+# =============================================================================
+# DMDController（核心修改类）
+# =============================================================================
+class DMDController:
+    MAX_SEQUENCE_FRAMES = 1000
+
+    def __init__(self, camera_handler=None):
+        # V4 SDK. Resolve the DLL relative to this script so launching the
+        # program from another working directory does not break DLL loading.
+        script_dir = (
+            os.path.dirname(os.path.abspath(__file__))
+            if '__file__' in globals()
+            else os.getcwd()
+        )
+        dll_path = os.path.join(
+            script_dir,
+            'JUOPT_DLP V4.0.002 20250522 release',
+            '4.DLL',
+            'DLL',
+            'JUOPT_DLL_V4.dll',
+        )
+        self._dll_directory_handle = None
+        self.DMD = None
+        try:
+            if not os.path.isfile(dll_path):
+                raise OSError('V4 DMD DLL not found: {}'.format(dll_path))
+
+            dll_dir = os.path.dirname(dll_path)
+            # os.add_dll_directory was introduced in Python 3.8. Keep the
+            # returned handle alive for as long as the controller exists.
+            if hasattr(os, 'add_dll_directory'):
+                self._dll_directory_handle = os.add_dll_directory(dll_dir)
+            else:
+                os.environ['PATH'] = dll_dir + os.pathsep + os.environ.get('PATH', '')
+
+            self.DMD = cdll.LoadLibrary(dll_path)
+            self._setup_v4_functions()
+            self.DMD.juoptInit()
+        except (OSError, AttributeError) as exc:
+            print('Failed to load JUOPT V4 DMD driver: {}'.format(exc))
+            self.DMD = None
+
+        self.is_init = False
+        self.dev_id = None
+        self.original_width = 1024
+        self.original_height = 768
+        self.pixel_group_size = 32
+        self.dmd_width = self.original_width // self.pixel_group_size
+        self.dmd_height = self.original_height // self.pixel_group_size
+        self.camera = camera_handler
+        self.current_pattern = None
+        self.pbr_history = []
+        self.optimization_running = False
+        self.current_pbr = 0
+        self.gen_best_pbr = 0
+        self.current_peak_intensity = 0
+        self.time_serie = []
+        
+        self.corr_history = []
+        self.corr_iterations = []
+        
+        self.r_history = []
+        self.mut_history = []
+        self.r_iterations = []
+        self.mut_iterations = []
+        
+        self.roi_x = getattr(self.camera, 'roi_x', 0)
+        self.roi_y = getattr(self.camera, 'roi_y', 0)
+        self.roi_width = getattr(self.camera, 'roi_width', 128)
+        self.roi_height = getattr(self.camera, 'roi_height', 128)
+        # The configured raw ROI is centered, so the extracted I90 channel's
+        # optical target remains at the center of the 128x128 output image.
+        self.focus_pos = (self.roi_width // 2, self.roi_height // 2)
+        
+        self.dmd_frame_rate = TARGET_ACQUISITION_FPS
+        
+        self.tm_path = 'C:\\Users\\1\\Desktop\\pyDMDholo-main\\holograms\\reconstructed_field.npy'
+        self.use_tm_init = True
+        
+        self.maxIter = 5000
+        self.pop_size = 40
+        self.n_offspring = 40
+        
+        self.C_start = 50.0
+        self.C_end = 50.0
+        self.tau_C = 0
+        
+        self.phase_values = np.array([1, 1j, -1, -1j], dtype=np.complex64)
+        self.opts_table = [
+            [1, 2, 3],
+            [0, 2, 3],
+            [0, 1, 3],
+            [0, 1, 2],
+        ]
+        
+        input_dim = self.dmd_width * self.dmd_height
+        self.eta0 = (np.sin(np.pi / 4) / (np.pi / 4)) ** 2 * (np.pi / 4) * input_dim
+        print(f"GA-ACO 初始化: 调制维度={input_dim}, 理论PBR上限 eta0={self.eta0:.2f}")
+        
+        self.tm_init_mask = self._load_tm_focus_mask()
+        
+        self.f_val = None
+        self.px_comb = None
+        self.lut = None
+        self.step = 0.01
+        self.ds_method = 'mean'
+        
+        if USE_NUMBA or HOLO_ORIGINAL_AVAILABLE:
+            try:
+                self.f_val, self.px_comb, self.lut = generate_lut('sp', 4)
+                print(f"全息图LUT预生成完成")
+            except Exception as e:
+                print(f"警告: LUT预生成失败: {e}")
+        else:
+            print("错误: 至少需要 Numba 或 dmd_holograms 模块之一！")
+        
+        self.holo_templates = None
+        self._init_holo_templates()
+        
+        self.bg_mask = None
+        self.current_mask = None
+        self.population = None
+        self.pop_fitness = None
+
+        # 增量评估缓存系统
+        self.pop_fitness_cache = {}
+        self.last_full_eval_gen = 0
+        self.r_trigger_threshold = 0.2
+
+    def _setup_v4_functions(self):
+        """Declare the JUOPT V4 ctypes ABI (compatible with Python 3.8)."""
+        if self.DMD is None:
+            return
+
+        dmd_id = c_long
+
+        self.DMD.juoptInit.argtypes = []
+        self.DMD.juoptInit.restype = None
+
+        self.DMD.juoptGetOnlineDevNum.argtypes = [POINTER(c_int)]
+        self.DMD.juoptGetOnlineDevNum.restype = c_long
+
+        self.DMD.juoptGetOnlineDevList.argtypes = []
+        self.DMD.juoptGetOnlineDevList.restype = POINTER(c_char_p)
+
+        self.DMD.juoptAllocDev.argtypes = [POINTER(dmd_id), c_char_p]
+        self.DMD.juoptAllocDev.restype = c_long
+
+        self.DMD.juoptSplitSquenceNum.argtypes = [dmd_id, c_int]
+        self.DMD.juoptSplitSquenceNum.restype = c_int
+
+        self.DMD.juoptInitSquenceSize.argtypes = [
+            dmd_id, c_uint, c_int, c_int, c_int, c_int
+        ]
+        self.DMD.juoptInitSquenceSize.restype = c_int
+
+        self.DMD.juoptClearOneSquenceData.argtypes = [dmd_id, c_uint]
+        self.DMD.juoptClearOneSquenceData.restype = c_int
+
+        self.DMD.juoptLoadPixmap.argtypes = [
+            dmd_id,
+            c_uint,
+            c_long,
+            c_long,
+            c_long,
+            POINTER(c_ubyte),
+            c_int,
+            c_int,
+            c_int,
+        ]
+        self.DMD.juoptLoadPixmap.restype = c_long
+
+        self.DMD.juoptProjection.argtypes = [dmd_id, c_uint, c_int]
+        self.DMD.juoptProjection.restype = c_long
+
+        self.DMD.juoptTimeControl.argtypes = [
+            dmd_id,
+            c_uint,
+            c_double,
+            c_double,
+            c_double,
+            c_double,
+            c_double,
+        ]
+        self.DMD.juoptTimeControl.restype = c_long
+
+        self.DMD.juoptSetDevPara.argtypes = [dmd_id, c_long, c_void_p]
+        self.DMD.juoptSetDevPara.restype = c_long
+
+        self.DMD.juoptStop.argtypes = [dmd_id]
+        self.DMD.juoptStop.restype = c_long
+
+        self.DMD.juoptFree.argtypes = [dmd_id]
+        self.DMD.juoptFree.restype = c_long
+
+    def _init_holo_templates(self):
+        if self.lut is None or self.px_comb is None:
+            return
+        template_path = 'holo_templates_4phase.npy'
+        try:
+            if os.path.exists(template_path):
+                self.holo_templates = np.load(template_path)
+                print(f"[Template] 已加载预计算模板: {template_path}")
+            else:
+                try:
+                    from holograms.dmd_holograms import precompute_holo_templates
+                    self.holo_templates = precompute_holo_templates(
+                        self.lut, self.px_comb, step=self.step, n_SP=4,
+                        original_height=self.original_height,
+                        original_width=self.original_width,
+                        save_path=template_path
+                    )
+                except ImportError:
+                    print("[Template] 外部模板预计算函数不可用")
+        except Exception as e:
+            print(f"[Template] 模板初始化失败: {e}")
+            self.holo_templates = None
+
+    def _load_tm_focus_mask(self):
+        if not self.use_tm_init:
+            return None
+        if not os.path.exists(self.tm_path):
+            print(f"[TM] 未找到传输矩阵文件: {self.tm_path}")
+            return None
+        try:
+            H = np.load(self.tm_path)
+            print(f"[TM] 加载传输矩阵: shape={H.shape}, dtype={H.dtype}")
+            N_out_expected = self.roi_width * self.roi_height
+            N_in_expected = self.dmd_width * self.dmd_height
+            if H.ndim != 2:
+                print(f"[TM] 错误: TM 不是2维数组")
+                return None
+            if H.shape[0] == N_out_expected and H.shape[1] == N_in_expected:
+                pass
+            elif H.shape[0] == N_in_expected and H.shape[1] == N_out_expected:
+                H = H.T
+            else:
+                print(f"[TM] 错误: TM 形状不匹配")
+                return None
+            fx, fy = self.focus_pos
+            fx = int(np.clip(fx, 0, self.roi_width - 1))
+            fy = int(np.clip(fy, 0, self.roi_height - 1))
+            col_idx = fy * self.roi_width + fx
+            if col_idx >= H.shape[0]:
+                print(f"[TM] 错误: 索引超出范围")
+                return None
+            h_row = H[col_idx, :]
+            print(f"[TM] 提取第 {col_idx} 行")
+            h_conj = np.conj(h_row)
+            input_field = h_conj.reshape(self.dmd_height, self.dmd_width)
+            phase = np.angle(input_field)
+            phase_0_2pi = ((phase % (2 * np.pi)) + (2 * np.pi)) % (2 * np.pi)
+            phase_idx = np.round(phase_0_2pi / (np.pi / 2)).astype(np.int32) % 4
+            unique_vals = np.unique(phase_idx)
+            print(f"[TM] 量化后唯一相位索引: {unique_vals}")
+            return phase_idx.astype(np.int8)
+        except Exception as e:
+            print(f"[TM] 加载失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def get_devices(self):
+        if self.DMD is None:
+            return []
+
+        dev_num = c_int(0)
+        result = self.DMD.juoptGetOnlineDevNum(byref(dev_num))
+        if result != 0:
+            print('juoptGetOnlineDevNum failed: {}'.format(result))
+            return []
+        if dev_num.value <= 0:
+            return []
+
+        names_ptr = self.DMD.juoptGetOnlineDevList()
+        if not names_ptr:
+            print('juoptGetOnlineDevList returned a null pointer')
+            return []
+
+        dev_names = []
+        for index in range(dev_num.value):
+            name = names_ptr[index]
+            if name:
+                dev_names.append(name.decode('utf-8', errors='replace'))
+        return dev_names
+
+    def initialize_device(self, device_name):
+        if self.DMD is None:
+            print('JUOPT V4 DMD driver is unavailable')
+            return False
+        if self.is_init:
+            return True
+
+        dev_id = c_long(0)
+        init_state = self.DMD.juoptAllocDev(
+            byref(dev_id), device_name.encode('utf-8')
+        )
+        if init_state != 0:
+            print('juoptAllocDev failed: {}'.format(init_state))
+            return False
+
+        self.dev_id = dev_id.value
+
+        def initialization_failed(message):
+            print(message)
+            try:
+                self.DMD.juoptFree(self.dev_id)
+            except Exception:
+                pass
+            self.dev_id = None
+            self.is_init = False
+            return False
+
+        # V4 must divide and initialize sequence memory before loading data.
+        result = self.DMD.juoptSplitSquenceNum(self.dev_id, 1)
+        if result != 0:
+            return initialization_failed(
+                'juoptSplitSquenceNum failed: {}'.format(result)
+            )
+
+        result = self.DMD.juoptInitSquenceSize(
+            self.dev_id,
+            0,
+            self.MAX_SEQUENCE_FRAMES,
+            self.original_width,
+            self.original_height,
+            0,  # JUOPT_BIT1
+        )
+        if result != 0:
+            return initialization_failed(
+                'juoptInitSquenceSize failed: {}'.format(result)
+            )
+
+        # JUOPT_SET_WMODE (0x1010): 0 selects master/trigger-output mode.
+        work_mode = c_int(0)
+        result = self.DMD.juoptSetDevPara(
+            self.dev_id, 0x1010, byref(work_mode)
+        )
+        if result != 0:
+            return initialization_failed(
+                'juoptSetDevPara(JUOPT_SET_WMODE) failed: {}'.format(result)
+            )
+
+        picture_time_us = 1000000.0 / float(self.dmd_frame_rate)
+        result = self.DMD.juoptTimeControl(
+            self.dev_id,
+            0,
+            picture_time_us,
+            0.0,
+            0.0,
+            10.0,
+            0.0,
+        )
+        if result != 0:
+            return initialization_failed(
+                'juoptTimeControl failed: {}'.format(result)
+            )
+
+        self.is_init = True
+        print(
+            "DMD '{}' initialized with V4 driver (ID {}, {:.1f} Hz)".format(
+                device_name, self.dev_id, self.dmd_frame_rate
+            )
+        )
+        return True
+
+    def _upsample_field(self, field):
+        if field.shape == (self.original_height, self.original_width):
+            return field
+        elif field.shape == (self.dmd_height, self.dmd_width):
+            return np.repeat(np.repeat(field, self.pixel_group_size, axis=0),
+                           self.pixel_group_size, axis=1)
+        else:
+            raise ValueError(f"Field shape {field.shape} 无法上采样")
+
+    def field_to_hologram(self, field):
+        if self.lut is None:
+            raise RuntimeError("LUT未初始化")
+        field = self._upsample_field(field)
+        if USE_NUMBA:
+            try:
+                holo = _holo_SP_numba(field, self.step, self.lut, self.px_comb, self.ds_method)
+                if holo.max() <= 1:
+                    holo = (holo.astype(np.float32) * 255.0).astype(np.uint8)
+                return holo
+            except Exception as e:
+                print(f"[Numba] 加速失败: {e}")
+        if HOLO_ORIGINAL_AVAILABLE:
+            try:
+                holo = holo_SP_original(field, self.lut, self.px_comb, ds_method=self.ds_method)
+                holo_norm = holo.astype(np.float32)
+                if np.max(holo_norm) > np.min(holo_norm):
+                    holo_norm = 255 * (holo_norm - np.min(holo_norm)) / (np.max(holo_norm) - np.min(holo_norm))
+                return holo_norm.astype(np.uint8)
+            except Exception as e:
+                print(f"[Original] holo_SP 失败: {e}")
+        if self.lut is not None and self.px_comb is not None:
+            print("[Fallback] 使用纯 NumPy 全息图生成")
+            holo = _holo_SP_numpy_fallback(field, self.step, self.lut, self.px_comb, self.ds_method)
+            if holo.max() <= 1:
+                holo = (holo.astype(np.float32) * 255.0).astype(np.uint8)
+            return holo
+        raise RuntimeError("无可用的全息图生成方法")
+
+    def batch_holograms_from_masks(self, masks):
+        if self.holo_templates is not None:
+            try:
+                from holograms.dmd_holograms import holo_SP_from_templates
+                holos = holo_SP_from_templates(masks, self.holo_templates)
+                if holos.max() <= 1:
+                    holos = (holos.astype(np.float32) * 255.0).astype(np.uint8)
+                return holos
+            except Exception as e:
+                print(f"[Template] 批量模板生成失败: {e}")
+        n = masks.shape[0]
+        holos = np.zeros((n, self.original_height, self.original_width), dtype=np.uint8)
+        for i in range(n):
+            field = self.phase_values[masks[i]]
+            field_up = self._upsample_field(field)
+            holos[i] = self.field_to_hologram(field_up)
+        return holos
+
+    def load_pattern(self, matrix):
+        if not self.is_init:
+            print('DMD device is not initialized')
+            return False
+
+        matrix = np.asarray(matrix, dtype=np.uint8)
+        if matrix.ndim == 2:
+            matrix = matrix[np.newaxis, ...]
+        if matrix.ndim != 3:
+            print('Pattern array must be 2-D or 3-D')
+            return False
+        if matrix.shape[1:] != (self.original_height, self.original_width):
+            print(
+                'Pattern shape {} does not match DMD shape ({}, {})'.format(
+                    matrix.shape[1:], self.original_height, self.original_width
+                )
+            )
+            return False
+
+        batch = matrix.shape[0]
+        if batch < 1 or batch > self.MAX_SEQUENCE_FRAMES:
+            print(
+                'Pattern batch size {} is outside the supported range 1..{}'.format(
+                    batch, self.MAX_SEQUENCE_FRAMES
+                )
+            )
+            return False
+
+        if not self.clear_sequence(0):
+            return False
+
+        matrix = np.ascontiguousarray(matrix, dtype=np.uint8)
+        data_ptr = matrix.ctypes.data_as(POINTER(c_ubyte))
+        result = self.DMD.juoptLoadPixmap(
+            self.dev_id,
+            0,
+            0,
+            0,  # JUOPT_BIT1
+            batch,
+            data_ptr,
+            1,
+            self.original_width,
+            self.original_height,
+        )
+        if result != 0:
+            print('juoptLoadPixmap failed: {}'.format(result))
+            return False
+
+        # Retaining the array also keeps its native data buffer alive.
+        self.current_pattern = matrix
+        return True
+
+    def clear_sequence(self, sequence_id=0):
+        if not self.is_init:
+            return False
+        result = self.DMD.juoptClearOneSquenceData(
+            self.dev_id, sequence_id
+        )
+        if result != 0:
+            print('juoptClearOneSquenceData failed: {}'.format(result))
+            return False
+        return True
+
+    def project_and_capture(self, patterns=None):
+        if not self.is_init:
+            return None
+        if patterns is None:
+            if self.current_pattern is None:
+                return None
+            patterns = self.current_pattern
+        else:
+            patterns = np.asarray(patterns)
+        if patterns.ndim == 2:
+            patterns = patterns[np.newaxis, ...]
+        batch = patterns.shape[0]
+        if not self.load_pattern(patterns):
+            return None if batch == 1 else [None]*batch
+
+        images = []
+        camera_started = False
+        try:
+            if self.camera:
+                self.camera.start()
+                camera_started = True
+
+            result = self.DMD.juoptProjection(self.dev_id, 0, 0)
+            if result != 0:
+                print('juoptProjection failed: {}'.format(result))
+                return None if batch == 1 else [None] * batch
+
+            for i in range(batch):
+                img = self.camera.run() if self.camera else None
+                images.append(img)
+                if img is not None and self.camera:
+                    try:
+                        while not self.camera.image_queue.empty():
+                            self.camera.image_queue.get_nowait()
+                        self.camera.image_queue.put((i, img), block=False)
+                    except queue.Full:
+                        pass
+        finally:
+            try:
+                self.DMD.juoptStop(self.dev_id)
+            except Exception as exc:
+                print('juoptStop failed: {}'.format(exc))
+            if camera_started:
+                try:
+                    self.camera.stop()
+                except Exception as exc:
+                    print('Camera stop failed: {}'.format(exc))
+            self.clear_sequence(0)
+
+        return images[0] if batch == 1 else images
+
+    def calculate_pbr(self, raw_image):
+        try:
+            if raw_image is None:
+                return 0.0
+            if len(raw_image.shape) == 3:
+                raw_image = raw_image[:,:,0]
+            x, y = self.focus_pos
+            x = int(np.clip(x, 1, self.roi_width - 2))
+            y = int(np.clip(y, 1, self.roi_height - 2))
+            peak_region = raw_image[y-1:y+2, x-1:x+2]
+            peak_intensity = np.max(peak_region).item()
+            self.current_peak_intensity = peak_intensity
+            if self.bg_mask is None or self.bg_mask.shape != raw_image.shape:
+                self.bg_mask = np.ones_like(raw_image, dtype=bool)
+                self.bg_mask[y-1:y+2, x-1:x+2] = False
+            bg_mean = raw_image[self.bg_mask].mean().item()
+            bg_mean = max(bg_mean, 1e-6)
+            return peak_intensity / bg_mean
+        except Exception as e:
+            print(f"[PBR] 计算错误: {e}")
+            return 0.0
+
+    def _mask_hash(self, mask):
+        return hash(mask.tobytes())
+
+    def _evaluate_population(self, gen_array, force_full_eval=False):
+        if not isinstance(gen_array, np.ndarray):
+            gen_array = np.array(gen_array)
+        N_in, n = gen_array.shape
+        Ny, Nx = self.dmd_height, self.dmd_width
+        masks = gen_array.T.reshape(n, Ny, Nx)
+        
+        fitness = np.zeros(n)
+        need_eval_idx = []
+        need_eval_masks = []
+        
+        for i in range(n):
+            mask_hash = self._mask_hash(masks[i])
+            if mask_hash in self.pop_fitness_cache and not force_full_eval:
+                fitness[i] = self.pop_fitness_cache[mask_hash]
+            else:
+                need_eval_idx.append(i)
+                need_eval_masks.append(masks[i])
+        
+        if len(need_eval_idx) > 0:
+            batch_masks = np.stack(need_eval_masks, axis=0)
+            batch_patterns = self.batch_holograms_from_masks(batch_masks)
+            images = self.project_and_capture(batch_patterns)
+            
+            if images is None:
+                images = []
+            if not isinstance(images, list):
+                images = [images]
+            
+            for idx_in_batch, global_idx in enumerate(need_eval_idx):
+                if idx_in_batch < len(images) and images[idx_in_batch] is not None:
+                    fit = self.calculate_pbr(images[idx_in_batch])
+                    fitness[global_idx] = fit
+                    self.pop_fitness_cache[self._mask_hash(masks[global_idx])] = fit
+                else:
+                    fitness[global_idx] = 0.0
+        
+        return fitness
+
+    def _generate_offspring_aco(self, Gen, Cost):
+        N, Pop = Gen.shape
+        Noffs = self.n_offspring
+        offs = np.zeros((N, Noffs), dtype=np.int8)
+        for g in range(N):
+            genes = Gen[g, :]
+            w = np.array([np.sum((genes == v) * Cost) for v in range(4)])
+            total = w.sum()
+            prob = w / total if total > 0 else np.ones(4)/4.0
+            offs[g, :] = np.random.choice(4, size=Noffs, p=prob)
+        return offs
+
+    def _mutate(self, offs, R):
+        N, Noffs = offs.shape
+        Nmut = int(np.round(N * R))
+        if Nmut <= 0:
+            return offs
+        for noff in range(Noffs):
+            mut_idx = np.random.choice(N, Nmut, replace=False)
+            for idx in mut_idx:
+                current = offs[idx, noff]
+                offs[idx, noff] = self.opts_table[current][np.random.randint(0, 3)]
+        return offs
+
+    def start_optimization(self):
+        if not self.optimization_running:
+            self.optimization_running = True
+            self.pbr_history = []
+            self.time_serie = []
+            self.corr_history = []
+            self.corr_iterations = []
+            self.r_history = []
+            self.mut_history = []
+            self.r_iterations = []
+            self.mut_iterations = []
+            self.pop_fitness_cache.clear()
+            self.last_full_eval_gen = 0
+            thread = threading.Thread(target=self.run_optimization)
+            thread.daemon = True
+            thread.start()
+
+    def stop_optimization(self):
+        self.optimization_running = False
+
+    def run_optimization(self):
+        Ny, Nx = self.dmd_height, self.dmd_width
+        N_in = Ny * Nx
+        
+        print("=" * 60)
+        print("GA-ACO 种群进化优化启动 (增量评估 + r触发全测量)")
+        print(f"调制分辨率: {Nx} x {Ny} = {N_in}")
+        print(f"触发阈值: r相对变化 > {self.r_trigger_threshold}")
+        print("=" * 60)
+        
+        # ---- 固定参考掩膜 ----
+        print("[Fixed Mask] 准备固定掩膜 (phase=0)...")
+        fixed_mask = np.zeros((Ny, Nx), dtype=np.int8)
+        fixed_field = self.phase_values[fixed_mask]
+        fixed_field_up = self._upsample_field(fixed_field)
+        fixed_holo = self.field_to_hologram(fixed_field_up)
+        ref_image = self.project_and_capture(fixed_holo)
+        ref_flat = ref_image.flatten().astype(np.float64) if ref_image is not None else None
+        if ref_flat is not None:
+            print("[Fixed Mask] 参考图像已记录")
+        else:
+            print("[Fixed Mask] 警告：参考图像为空")
+        
+        self.corr_history = []
+        self.corr_iterations = []
+        
+        # 种群初始化
+        if self.tm_init_mask is not None:
+            print(f"[Init] 使用 TM 初始化掩膜")
+            Gen = np.zeros((N_in, self.pop_size), dtype=np.int8)
+            Gen[:, 0] = self.tm_init_mask.flatten()
+            n_mutate = max(1, int(N_in * 0.20))
+            for i in range(1, self.pop_size):
+                base = self.tm_init_mask.flatten().copy()
+                mut_idx = np.random.choice(N_in, n_mutate, replace=False)
+                for idx in mut_idx:
+                    current = base[idx]
+                    base[idx] = self.opts_table[current][np.random.randint(0, 3)]
+                Gen[:, i] = base
+        else:
+            print("[Init] 纯随机初始化")
+            Gen = np.random.randint(0, 4, size=(N_in, self.pop_size), dtype=np.int8)
+        
+        # 初始种群全测量
+        print("评估初始种群...")
+        Cost = self._evaluate_population(Gen, force_full_eval=True)
+        sort_idx = np.argsort(Cost)[::-1]
+        Gen = Gen[:, sort_idx]
+        Cost = Cost[sort_idx]
+        
+        current_pbr = Cost[0]
+        self.current_mask = Gen[:, 0].reshape(Ny, Nx).copy()
+        self.gen_best_pbr = Cost[0]
+        self.last_full_eval_gen = 0
+        
+        self.pbr_history.append(self.gen_best_pbr)
+        self.time_serie.append(datetime.now())
+        self.current_pbr = current_pbr
+        
+        # ==================== 主循环 ====================
+        for iGen in range(1, self.maxIter + 1):
+            if not self.optimization_running:
+                print("优化被用户中断")
+                break
+            
+            # --- 每 10 代测量一次相关系数 ---
+            if iGen % 10 == 0:
+                if ref_flat is not None:
+                    try:
+                        cur_image = self.project_and_capture(fixed_holo)
+                        if cur_image is not None:
+                            cur_flat = cur_image.flatten().astype(np.float64)
+                            if np.std(ref_flat) < 1e-12 or np.std(cur_flat) < 1e-12:
+                                corr_val = 0.0
+                            else:
+                                corr_val = float(np.corrcoef(ref_flat, cur_flat)[0, 1])
+                            self.corr_history.append(corr_val)
+                            self.corr_iterations.append(iGen)
+                    except Exception as e:
+                        print(f"[Corr] 计算失败: {e}")
+            
+            # 计算错误率 r
+            best_pbr = Cost[0]
+            eta_ratio = best_pbr / self.eta0 if self.eta0 > 0 else 0
+            r = (1.0 - np.sqrt(eta_ratio)) * 0.75
+            r = max(min(r, 0.75), 0.0)
+            C = 50.0
+            R = r / C
+            
+            Nmut = int(np.round(N_in * R))
+            self.r_history.append(r)
+            self.mut_history.append(Nmut)
+            self.r_iterations.append(iGen)
+            self.mut_iterations.append(iGen)
+            
+            # 判断 r 是否突变
+            r_changed_significantly = False
+            r_change_ratio = 0.0
+            if len(self.r_history) >= 2:
+                last_r = self.r_history[-2]
+                if last_r > 1e-6:
+                    r_change_ratio = abs(r - last_r) / last_r
+                else:
+                    r_change_ratio = abs(r - last_r)
+                r_changed_significantly = r_change_ratio > self.r_trigger_threshold
+            
+            force_full = r_changed_significantly or (iGen - self.last_full_eval_gen >= 10)
+            
+            if force_full:
+                reason = "r突变" if r_changed_significantly else "周期强制"
+                print(f"\n[{'='*50}]")
+                print(f"[Trigger] Gen {iGen}: 全种群测量触发")
+                print(f"  原因: {reason}")
+                print(f"  r变化: {r_change_ratio:.4f} (阈值: {self.r_trigger_threshold})")
+                print(f"  距上次全测量: {iGen - self.last_full_eval_gen} 代")
+                print(f"[{'='*50}]\n")
+                self.last_full_eval_gen = iGen
+            
+            # ==================== 核心：生成后代 ====================
+            # 先生成后代（基于当前父代的 ACO 概率图）
+            offs = self._generate_offspring_aco(Gen, Cost)
+            offs = self._mutate(offs, R)
+            
+            # ==================== 核心：评估逻辑 ====================
+            if force_full:
+                # ========== r 突变：全测量模式 ==========
+                # 
+                # 步骤：
+                # 1. 父代 + 后代 = 80个，全部重新投影采集
+                # 2. 基于最新 fitness 选择 top 40
+                # 3. 用这 40 个的实测 fitness 作为下一代父代
+                # 4. 清空缓存，只保留这 40 个的最新值
+                # 5. 下代 ACO 概率图基于这 40 个的实测值
+                
+                allGen = np.concatenate([Gen, offs], axis=1)
+                
+                # 全部重新测量（忽略缓存）
+                allCost = self._evaluate_population(allGen, force_full_eval=True)
+                
+                # 选择 top μ
+                sort_idx_all = np.argsort(allCost)[::-1]
+                best_indices = sort_idx_all[:self.pop_size]
+                Gen = allGen[:, best_indices]
+                Cost = allCost[best_indices]
+                
+                # 清空缓存，写入选中的 40 个最新值
+                self.pop_fitness_cache.clear()
+                for i in range(self.pop_size):
+                    self.pop_fitness_cache[self._mask_hash(Gen[:, i].reshape(Ny, Nx))] = Cost[i]
+                
+                # 更新全局最优
+                if Cost[0] > current_pbr:
+                    current_pbr = Cost[0]
+                    self.current_mask = Gen[:, 0].reshape(Ny, Nx).copy()
+                
+                self.gen_best_pbr = Cost[0]
+                self.pbr_history.append(self.gen_best_pbr)
+                self.time_serie.append(datetime.now())
+                self.current_pbr = current_pbr
+                
+                print(f"[Full Eval] Gen {iGen}: 全测80个 → 选top40 → "
+                      f"best={self.gen_best_pbr:.2f}, cache已刷新")
+                
+                # 直接进入下一代（已选择完毕，无需后续合并）
+                continue
+                
+            else:
+                # ========== r 稳定：增量评估模式 ==========
+                # 父代 fitness 可信，直接复用
+                
+                Cost_off = self._evaluate_population(offs, force_full_eval=False)
+                
+                # 合并
+                allGen = np.concatenate([Gen, offs], axis=1)
+                allCost = np.concatenate([Cost, Cost_off])
+            
+            # ==================== 选择下一代父代 ====================
+            sort_idx_all = np.argsort(allCost)[::-1]
+            best_indices = sort_idx_all[:self.pop_size]
+            Gen = allGen[:, best_indices]
+            Cost = allCost[best_indices]
+            
+            # 更新全局最优
+            if Cost[0] > current_pbr:
+                current_pbr = Cost[0]
+                self.current_mask = Gen[:, 0].reshape(Ny, Nx).copy()
+            
+            self.gen_best_pbr = Cost[0]
+            self.pbr_history.append(self.gen_best_pbr)
+            self.time_serie.append(datetime.now())
+            self.current_pbr = current_pbr
+            
+            # 日志
+            if iGen % 10 == 0:
+                eval_mode = "FULL" if force_full else "PARTIAL"
+                cache_info = f"cache={len(self.pop_fitness_cache)}"
+                print(f"[{eval_mode}] Gen {iGen:5d}: best={self.gen_best_pbr:7.2f}, "
+                      f"global={current_pbr:7.2f}, r={r:.4f}, R={R:.6f}, "
+                      f"Nmut={Nmut:4d}, {cache_info}")
+        
+        # 优化结束
+        print("投影最佳相位图案...")
+        final_field = self.phase_values[self.current_mask]
+        final_field_up = self._upsample_field(final_field)
+        final_holo = self.field_to_hologram(final_field_up)
+        self.load_pattern(final_holo)
+        self.project_and_capture()
+        
+        print(f"优化完成! 最终PBR: {current_pbr:.2f}")
+        self.optimization_running = False
+
+    def cleanup(self):
+        if self.is_init and self.DMD is not None and self.dev_id is not None:
+            self.stop_optimization()
+            try:
+                self.DMD.juoptStop(self.dev_id)
+                self.DMD.juoptClearOneSquenceData(self.dev_id, 0)
+                result = self.DMD.juoptFree(self.dev_id)
+                if result != 0:
+                    print('juoptFree failed: {}'.format(result))
+            finally:
+                self.is_init = False
+                self.dev_id = None
+            print("DMD device released")
+
+        if self._dll_directory_handle is not None:
+            try:
+                self._dll_directory_handle.close()
+            except Exception:
+                pass
+            self._dll_directory_handle = None
+
+
+# =============================================================================
+# Application（GUI - 使用子进程绘图）
+# =============================================================================
+class Application(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("DMD GA-ACO Population Evolution")
+        
+        self.camera = CameraHandler(cam_index=0, save_path="./camera_1", trigger_enabled=True)
+        self.camera.convert_to_12bit = False
+        
+        self.dmd_controller = DMDController(self.camera)
+        
+        # 创建多进程通信队列
+        self.plot_data_queue = MPQueue(maxsize=2)
+        self.plot_cmd_queue = MPQueue()
+        
+        # 启动绘图子进程
+        self.plot_process = Process(target=plot_worker, 
+                                   args=(self.plot_data_queue, self.plot_cmd_queue))
+        self.plot_process.start()
+        print(f"[Main] 绘图子进程已启动 (PID: {self.plot_process.pid})")
+        
+        self.setup_ui()
+        self.init_dmd_device()
+        
+        # 绘图更新参数
+        self.vis_update_interval = 200
+        self.last_vis_update = 0
+        
+        self.after(100, self.update_visualization)
+    
+    def setup_ui(self):
+        control_frame = ttk.Frame(self)
+        control_frame.pack(pady=10)
+        
+        self.btn_init = ttk.Button(control_frame, text="Initialize DMD", command=self.init_dmd_device)
+        self.btn_init.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_start = ttk.Button(control_frame, text="Start Optimization", command=self.start_optimization)
+        self.btn_start.pack(side=tk.LEFT, padx=5)
+        self.btn_start.config(state=tk.DISABLED)
+        
+        self.btn_stop = ttk.Button(control_frame, text="Stop Optimization", command=self.stop_optimization)
+        self.btn_stop.pack(side=tk.LEFT, padx=5)
+        self.btn_stop.config(state=tk.DISABLED)
+        
+        status_frame = ttk.LabelFrame(self, text="System Status")
+        status_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        row1 = ttk.Frame(status_frame)
+        row1.pack(fill=tk.X, pady=2)
+        self.lbl_dmd_status = ttk.Label(row1, text="DMD: Not Initialized")
+        self.lbl_dmd_status.pack(side=tk.LEFT, padx=10)
+        self.lbl_camera_status = ttk.Label(row1, text="Camera: Connected (Trigger)")
+        self.lbl_camera_status.pack(side=tk.LEFT, padx=10)
+        self.lbl_sync_status = ttk.Label(row1, text="Sync: Waiting...")
+        self.lbl_sync_status.pack(side=tk.LEFT, padx=10)
+
+        row2 = ttk.Frame(status_frame)
+        row2.pack(fill=tk.X, pady=2)
+        self.lbl_pbr = ttk.Label(row2, text="Gen Best PBR: -")
+        self.lbl_pbr.pack(side=tk.LEFT, padx=10)
+        self.lbl_peak_intensity = ttk.Label(row2, text="Peak Intensity: -")
+        self.lbl_peak_intensity.pack(side=tk.LEFT, padx=10)
+        self.lbl_iter = ttk.Label(row2, text="Iteration: -")
+        self.lbl_iter.pack(side=tk.LEFT, padx=10)
+        self.lbl_region = ttk.Label(row2, text="GA-ACO: μ=40, λ=40")
+        self.lbl_region.pack(side=tk.LEFT, padx=10)
+
+        log_frame = ttk.LabelFrame(self, text="System Log")
+        log_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.log_text = tk.Text(log_frame, height=4, state=tk.DISABLED)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+        vis_frame = ttk.LabelFrame(self, text="Optimization Visualization (Subprocess Render)")
+        vis_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        self.plot_label = tk.Label(vis_frame, bg='black')
+        self.plot_label.pack(fill=tk.BOTH, expand=True)
+        
+        self.plot_status = tk.Label(vis_frame, text="Waiting for plot data...", fg='gray')
+        self.plot_status.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def _load_plot_image(self):
+        try:
+            img_path = 'plot_output.png'
+            if os.path.exists(img_path):
+                from PIL import Image, ImageTk
+                width = self.plot_label.winfo_width()
+                height = self.plot_label.winfo_height()
+                if width > 1 and height > 1:
+                    img = Image.open(img_path)
+                    # 保持原始宽高比，使用 contain 模式填充
+                    img_ratio = img.width / img.height
+                    label_ratio = width / height
+                    if label_ratio > img_ratio:
+                        # Label 更宽，以高度为基准
+                        new_height = height
+                        new_width = int(height * img_ratio)
+                    else:
+                        # Label 更高，以宽度为基准
+                        new_width = width
+                        new_height = int(width / img_ratio)
+                    img = img.resize((new_width, new_height), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    self.plot_label.config(image=photo)
+                    self.plot_label.image = photo
+                    self.plot_status.config(text=f"Last update: {time.strftime('%H:%M:%S')}", fg='green')
+                    return True
+        except Exception as e:
+            self.plot_status.config(text=f"Image load error: {e}", fg='red')
+        return False
+
+    def update_visualization(self):
+        now = time.time() * 1000
+        
+        if now - self.last_vis_update > self.vis_update_interval:
+            self.last_vis_update = now
+            
+            camera_img = None
+            try:
+                if not self.camera.image_queue.empty():
+                    idx, img_data = self.camera.image_queue.get_nowait()
+                    if len(img_data.shape) == 3:
+                        img_data = np.mean(img_data, axis=2)
+                    camera_img = img_data
+            except:
+                pass
+            
+            if len(self.dmd_controller.time_serie) > 0:
+                t0 = self.dmd_controller.time_serie[0]
+                time_seconds = [(t - t0).total_seconds() for t in self.dmd_controller.time_serie]
+            else:
+                time_seconds = []
+            
+            data = {
+                'camera_img': camera_img,
+                'time_seconds': time_seconds,
+                'pbr_history': list(self.dmd_controller.pbr_history),
+                'corr_history': list(self.dmd_controller.corr_history),
+                'corr_iterations': list(self.dmd_controller.corr_iterations),
+                'r_history': list(self.dmd_controller.r_history),
+                'r_iterations': list(self.dmd_controller.r_iterations),
+                'mut_history': list(self.dmd_controller.mut_history),
+                'mut_iterations': list(self.dmd_controller.mut_iterations),
+            }
+            
+            try:
+                self.plot_data_queue.put_nowait(data)
+            except:
+                pass
+            
+            self._load_plot_image()
+
+        self.lbl_pbr.config(text=f"Gen Best PBR: {self.dmd_controller.gen_best_pbr:.2f}")
+        self.lbl_peak_intensity.config(text=f"Peak Intensity: {self.dmd_controller.current_peak_intensity:.1f}")
+        n_iter = len(self.dmd_controller.pbr_history)
+        self.lbl_iter.config(text=f"Iteration: {n_iter}")
+
+        if self.dmd_controller.optimization_running:
+            self.lbl_sync_status.config(
+                text=f"Sync: Running {self.dmd_controller.dmd_frame_rate:.0f}Hz"
+            )
+        else:
+            self.lbl_sync_status.config(text="Sync: Ready")
+
+        self.after(100, self.update_visualization)
+
+    def init_dmd_device(self):
+        def _init():
+            self.log("Initializing DMD device...")
+            devices = self.dmd_controller.get_devices()
+            if devices:
+                if self.dmd_controller.initialize_device(devices[0]):
+                    rate = self.dmd_controller.dmd_frame_rate
+                    self.log(f"DMD initialized successfully ({rate:.0f}Hz sync mode)")
+                    self.lbl_dmd_status.config(
+                        text=f"DMD Status: Initialized ({rate:.0f}Hz)"
+                    )
+                    self.lbl_sync_status.config(
+                        text=f"Sync Status: Ready ({rate:.0f}Hz)"
+                    )
+                    self.btn_start.config(state=tk.NORMAL)
+                else:
+                    self.log("DMD initialization failed")
+            else:
+                self.log("No DMD devices found")
+        threading.Thread(target=_init, daemon=True).start()
+    
+    def start_optimization(self):
+        self.btn_start.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.NORMAL)
+        self.log("Starting GA-ACO population evolution...")
+        def _optimize():
+            self.dmd_controller.start_optimization()
+            while self.dmd_controller.optimization_running:
+                time.sleep(0.5)
+            self.btn_start.config(state=tk.NORMAL)
+            self.btn_stop.config(state=tk.DISABLED)
+            self.log("Optimization process stopped")
+        threading.Thread(target=_optimize, daemon=True).start()
+    
+    def stop_optimization(self):
+        self.dmd_controller.stop_optimization()
+        self.log("Stopping optimization process...")
+    
+    def log(self, message):
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.insert(tk.END, f"{time.strftime('%H:%M:%S')} - {message}\n")
+        self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
+    
+    def on_closing(self):
+        try:
+            self.plot_cmd_queue.put('STOP')
+            self.plot_process.join(timeout=2)
+            if self.plot_process.is_alive():
+                self.plot_process.terminate()
+        except:
+            pass
+        
+        self.dmd_controller.cleanup()
+        self.camera.cleanup()
+        self.destroy()
+
+
+if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
+    app = Application()
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
+    app.mainloop()

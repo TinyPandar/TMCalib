@@ -37,8 +37,10 @@ class FakeHardware:
     def close_camera(self) -> None:
         self.closed = True
 
-    def run_measurement(self, progress: ProgressCallback) -> OperationResult:
+    def run_measurement(self, progress: ProgressCallback, frame_callback=None) -> OperationResult:
         self.measure_count += 1
+        if frame_callback is not None:
+            frame_callback([[10, 20], [30, 40]])
         progress(50, "half")
         progress(100, "done")
         return OperationResult(True, "measured")
@@ -56,9 +58,20 @@ class FakeHardware:
 
     def focus(self, x: int, y: int) -> OperationResult:
         self.focus_points.append((x, y))
-        return OperationResult(True, "focused", {"x": x, "y": y, "pbr": 10.0})
+        return OperationResult(
+            True,
+            "focused",
+            {
+                "x": x,
+                "y": y,
+                "pbr": 10.0,
+                "focused_image": [[50, 60], [70, 80]],
+            },
+        )
 
-    def run_pixelwise_report(self, progress: ProgressCallback) -> OperationResult:
+    def run_pixelwise_report(self, progress: ProgressCallback, frame_callback=None) -> OperationResult:
+        if frame_callback is not None:
+            frame_callback([[90, 100], [110, 120]])
         progress(100, "done")
         return OperationResult(True, "reported", {"avg_pbr": 8.0})
 

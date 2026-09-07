@@ -1,0 +1,228 @@
+{
+  "status": "complete",
+  "validation_protocol_version": "random_amplitude_interleaved_v2_amplitude_preserving",
+  "created_at": "2026-09-04T17:59:37.377379+08:00",
+  "variant": "ordinary",
+  "tm_filename": "reconstructed_field.npy",
+  "sample_count": 64,
+  "captured_frame_count": 128,
+  "seed": 20260904,
+  "input_shape": [
+    24,
+    32
+  ],
+  "roi_shape": [
+    128,
+    128
+  ],
+  "amplitude_distribution": "independent uniform [0, 1], normalized by frame maximum",
+  "phase_distribution": "independent uniform [-pi, pi)",
+  "capture_order": "random amplitude+phase, matching phase-only control, interleaved",
+  "camera_processing": {
+    "per_frame_normalization": false,
+    "dark_level_subtracted_for_metrics": 0.0,
+    "raw_captures_saved": true,
+    "capture_dtype": "uint8",
+    "capture_min": 0.0,
+    "capture_max": 57.0,
+    "frame_max": {
+      "count": 128,
+      "mean": 28.9609375,
+      "std": 13.321389252667823,
+      "min": 12.0,
+      "q10": 15.0,
+      "median": 27.5,
+      "q90": 45.3,
+      "max": 57.0
+    },
+    "pixels_at_255_fraction": 0.0,
+    "frames_reaching_255_fraction": 0.0
+  },
+  "prediction": "abs(lut_effective_X @ H.T)**2",
+  "prediction_backend": "cuda:0",
+  "scale_calibration": {
+    "shared_global_intensity_scale": 0.0054279665943036655,
+    "note": "One shared scale preserves between-frame amplitude information."
+  },
+  "random_amplitude_phase": {
+    "spatial_pearson": {
+      "count": 64,
+      "mean": 0.45095289198071864,
+      "std": 0.030180767119409677,
+      "min": 0.39321468028403883,
+      "q10": 0.4118510919033331,
+      "median": 0.44982745359367216,
+      "q90": 0.49597852534747067,
+      "max": 0.5293468820155283
+    },
+    "nrmse_shared_scale": {
+      "count": 64,
+      "mean": 0.6472504153947168,
+      "std": 0.012935236428603811,
+      "min": 0.6170719269136843,
+      "q10": 0.6282992692964197,
+      "median": 0.6478046410722365,
+      "q90": 0.6630979968477216,
+      "max": 0.6754303650836632
+    },
+    "nrmse_per_frame_scale": {
+      "count": 64,
+      "mean": 0.6456162439426807,
+      "std": 0.013464384809657117,
+      "min": 0.6127084022575098,
+      "q10": 0.626090073709928,
+      "median": 0.6468511284621095,
+      "q90": 0.6620025413395068,
+      "max": 0.6720208758389468
+    },
+    "fitted_scale_per_frame": {
+      "count": 64,
+      "mean": 0.0057437604713038316,
+      "std": 0.0001507153511754289,
+      "min": 0.005371577349692486,
+      "q10": 0.005560313513915192,
+      "median": 0.005740108599251467,
+      "q90": 0.005950142256459375,
+      "max": 0.006039987047834625
+    },
+    "frame_energy_pearson": 0.8509973317092976
+  },
+  "phase_only_control": {
+    "spatial_pearson": {
+      "count": 64,
+      "mean": 0.5973088525511931,
+      "std": 0.014218180506386983,
+      "min": 0.5683185362304367,
+      "q10": 0.5798683649888772,
+      "median": 0.5970478483351118,
+      "q90": 0.6193676813039598,
+      "max": 0.6297316979516123
+    },
+    "nrmse_shared_scale": {
+      "count": 64,
+      "mean": 0.572015423828109,
+      "std": 0.008104620928554863,
+      "min": 0.5533179889323796,
+      "q10": 0.5604814466417313,
+      "median": 0.5718280953643721,
+      "q90": 0.5827959202699219,
+      "max": 0.5885541527741665
+    },
+    "nrmse_per_frame_scale": {
+      "count": 64,
+      "mean": 0.571862937442511,
+      "std": 0.008012267899543625,
+      "min": 0.5532970663298711,
+      "q10": 0.5603036578304511,
+      "median": 0.5717080662604751,
+      "q90": 0.5826800361682918,
+      "max": 0.5883484197790105
+    },
+    "fitted_scale_per_frame": {
+      "count": 64,
+      "mean": 0.005393293721300006,
+      "std": 7.904103087331171e-05,
+      "min": 0.005174446169729496,
+      "q10": 0.00531058946846321,
+      "median": 0.00539508947436905,
+      "q90": 0.0054891188752014455,
+      "max": 0.005581447346406471
+    },
+    "frame_energy_pearson": 0.5092984132622003
+  },
+  "amplitude_effect": {
+    "definition": "random-amplitude frame minus phase-only frame with identical phase",
+    "spatial_pearson_gap_phase_only_minus_random_amplitude": 0.1463559605704745,
+    "delta_spatial_pearson": {
+      "count": 64,
+      "mean": 0.5682787828489462,
+      "std": 0.013316031692862466,
+      "min": 0.5300633517935053,
+      "q10": 0.5526337630363838,
+      "median": 0.5684004541352775,
+      "q90": 0.5874077653242706,
+      "max": 0.5980200936268573
+    },
+    "delta_nrmse_shared_scale": {
+      "count": 64,
+      "mean": 0.652505448663316,
+      "std": 0.01027792160109123,
+      "min": 0.6312658337237965,
+      "q10": 0.6382839478412634,
+      "median": 0.6540250277171951,
+      "q90": 0.6644051639110611,
+      "max": 0.6774651921487144
+    },
+    "amplitude_to_phase_energy_ratio_pearson": 0.8592428807843319,
+    "predicted_energy_ratio": {
+      "count": 64,
+      "mean": 0.33901261733285976,
+      "std": 0.01467794760908095,
+      "min": 0.3034807521871903,
+      "q10": 0.31994815906268664,
+      "median": 0.33932702259031444,
+      "q90": 0.3575559373913601,
+      "max": 0.369821891366978
+    },
+    "measured_energy_ratio": {
+      "count": 64,
+      "mean": 0.39425278800760033,
+      "std": 0.012136359246330202,
+      "min": 0.36596174282678,
+      "q10": 0.3798421894365266,
+      "median": 0.39429386482831297,
+      "q90": 0.4105735432392469,
+      "max": 0.41945685728471815
+    }
+  },
+  "encoding": {
+    "px": 4,
+    "downsample_method": "mean",
+    "backend": "amplitude-preserving V4 batch encoder adapter",
+    "fallback_error": null,
+    "prediction_uses_lut_effective_field": true,
+    "validation_encoder": "amplitude-preserving V4 batch encoder adapter",
+    "amplitude_was_preserved_during_pattern_encoding": true,
+    "active_pattern_pair_hamming_fraction": {
+      "count": 64,
+      "mean": 0.27570088704427087,
+      "std": 0.0045744453891270204,
+      "min": 0.265869140625,
+      "q10": 0.2697672526041667,
+      "median": 0.27571614583333337,
+      "q90": 0.2809244791666667,
+      "max": 0.2884114583333333
+    },
+    "random_amplitude_pattern_on_fraction": {
+      "count": 64,
+      "mean": 0.34562047322591144,
+      "std": 0.003001584496505906,
+      "min": 0.3372395833333333,
+      "q10": 0.34287923177083335,
+      "median": 0.3448893229166667,
+      "q90": 0.3499348958333333,
+      "max": 0.3519694010416667
+    },
+    "phase_only_pattern_on_fraction": {
+      "count": 64,
+      "mean": 0.46897252400716144,
+      "std": 0.001061384245880829,
+      "min": 0.466552734375,
+      "q10": 0.4675455729166667,
+      "median": 0.4690755208333333,
+      "q90": 0.4702473958333333,
+      "max": 0.4715169270833333
+    }
+  },
+  "files": {
+    "requested_input_fields": "C:\\Users\\smart\\Documents\\Repos\\TMCalib\\random_amplitude_validation_v4\\20260904_175935_ordinary_n64\\requested_input_fields.npy",
+    "lut_effective_input_fields": "C:\\Users\\smart\\Documents\\Repos\\TMCalib\\random_amplitude_validation_v4\\20260904_175935_ordinary_n64\\lut_effective_input_fields.npy",
+    "camera_captures_raw": "C:\\Users\\smart\\Documents\\Repos\\TMCalib\\random_amplitude_validation_v4\\20260904_175935_ordinary_n64\\camera_captures_raw.npy",
+    "tm_predicted_intensity": "C:\\Users\\smart\\Documents\\Repos\\TMCalib\\random_amplitude_validation_v4\\20260904_175935_ordinary_n64\\tm_predicted_intensity.npy",
+    "metrics_csv": "C:\\Users\\smart\\Documents\\Repos\\TMCalib\\random_amplitude_validation_v4\\20260904_175935_ordinary_n64\\metrics_per_frame.csv",
+    "examples_png": "C:\\Users\\smart\\Documents\\Repos\\TMCalib\\random_amplitude_validation_v4\\20260904_175935_ordinary_n64\\random_amplitude_examples.png",
+    "summary_png": "C:\\Users\\smart\\Documents\\Repos\\TMCalib\\random_amplitude_validation_v4\\20260904_175935_ordinary_n64\\random_amplitude_summary.png",
+    "summary_json": "C:\\Users\\smart\\Documents\\Repos\\TMCalib\\random_amplitude_validation_v4\\20260904_175935_ordinary_n64\\summary.json"
+  },
+  "additional_transmission_matrices": {}
+}

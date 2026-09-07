@@ -1,0 +1,37 @@
+{
+  "experiment_question": "How many commanded field-amplitude levels are measurably distinct?",
+  "hypothesis": "After dark/reference correction, intensity follows A^2 and recovered amplitude follows A.",
+  "profile": "fourfold_128x96",
+  "input_shape": [
+    96,
+    128
+  ],
+  "camera_shape": [
+    128,
+    128
+  ],
+  "dmd_shape": [
+    768,
+    1024
+  ],
+  "phase_rad": 0.0,
+  "level_count": 5,
+  "levels": [
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0
+  ],
+  "repeat_count": 5,
+  "random_seed": 20260827,
+  "exposure_us": 1000.0,
+  "settle_ms": 50.0,
+  "capture_attempts": 3,
+  "acquisition_mode": "one repeating DMD pattern and one clean camera session per frame",
+  "sensor_max": 255.0,
+  "distinguishability_z": 3.0,
+  "sequence_length": 45,
+  "normalization": "per-repeat dark/white anchors; A_meas=sqrt((I-I_dark)/(I_white-I_dark))",
+  "hologram_amplitude_scaling": "absolute [0,1] LUT scaling with encoder renormalization disabled; A=0 uses an all-off DMD pattern"
+}

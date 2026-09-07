@@ -28,6 +28,11 @@ class FocusEncoding160x120Tests(unittest.TestCase):
         controller.last_focus_encoding_fallback_error = None
         return controller
 
+    def test_pattern_config_provider_accepts_shared_controller_output_tag(self):
+        module = importlib.import_module("calibrate_160x120")
+        config = module.get_active_160x120_pattern_config(None)
+        self.assertEqual(config["name"], "8N")
+
     def test_profile_enables_its_specialized_gpu_encoder(self):
         module = importlib.import_module("calibrate_160x120")
         with mock.patch.object(

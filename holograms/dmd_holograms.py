@@ -1,8 +1,6 @@
 """Module containing the functions for generating holograms"""
 import numpy as np
 
-from skimage.measure import block_reduce
-
 
 #######################################################################
 # Aux definition
@@ -150,8 +148,26 @@ def _down_sample(field, nsp, method='center'):
         ds_field /= nsp**2
     elif method=='side':
         ds_field = field[::nsp,::nsp]
-    elif method == 'max':                     # 新增：取每个块的最大值
-        ds_field = block_reduce(field, (nsp, nsp), np.max)
+    elif method == 'max':
+        # Keep this small operation NumPy-only. Importing
+        # ``skimage.measure.block_reduce`` pulls another Intel OpenMP runtime
+        # into the PyTorch/PySpin process on Windows and aborts the GUI with
+        # OMP Error #15.
+        height, width = field.shape
+        padded_height = ((height + nsp - 1) // nsp) * nsp
+        padded_width = ((width + nsp - 1) // nsp) * nsp
+        if (padded_height, padded_width) != (height, width):
+            field = np.pad(
+                field,
+                ((0, padded_height - height), (0, padded_width - width)),
+                mode='constant',
+            )
+        ds_field = field.reshape(
+            padded_height // nsp,
+            nsp,
+            padded_width // nsp,
+            nsp,
+        ).max(axis=(1, 3))
     else:
         raise ValueError('Invalid option for method.')
     return ds_field

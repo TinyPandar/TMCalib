@@ -1,0 +1,220 @@
+{
+  "id": "2026-09-07-174537",
+  "generated_at": "2026-09-07T09:45:37.3847121Z",
+  "language": "zh",
+  "pages": [
+    {
+      "slug": "1-xiang-mu-gai-lan-guang-chuan-shu-ju-zhen-ce-liang-yu-zhu-dian-ju-jiao-ping-tai",
+      "title": "项目概览：光传输矩阵测量与逐点聚焦平台",
+      "file": "1-xiang-mu-gai-lan-guang-chuan-shu-ju-zhen-ce-liang-yu-zhu-dian-ju-jiao-ping-tai.md",
+      "section": "快速上手",
+      "level": "Beginner"
+    },
+    {
+      "slug": "2-kuai-su-kai-shi",
+      "title": "快速开始",
+      "file": "2-kuai-su-kai-shi.md",
+      "section": "快速上手",
+      "level": "Beginner"
+    },
+    {
+      "slug": "3-ying-jian-yu-han-shang-sdk-huan-jing-pei-zhi",
+      "title": "硬件与厂商 SDK 环境配置",
+      "file": "3-ying-jian-yu-han-shang-sdk-huan-jing-pei-zhi.md",
+      "section": "快速上手",
+      "group": "环境准备与启动",
+      "level": "Beginner"
+    },
+    {
+      "slug": "4-ming-ling-xing-qi-dong-ge-biao-ding-profile",
+      "title": "命令行启动各标定 Profile",
+      "file": "4-ming-ling-xing-qi-dong-ge-biao-ding-profile.md",
+      "section": "快速上手",
+      "group": "环境准备与启动",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "5-pyside6-tong-zhuo-mian-kong-zhi-tai-cao-zuo",
+      "title": "PySide6 统一桌面控制台操作",
+      "file": "5-pyside6-tong-zhuo-mian-kong-zhi-tai-cao-zuo.md",
+      "section": "快速上手",
+      "group": "环境准备与启动",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "6-64-zheng-guang-xue-ce-shi-yu-ying-jian-mou-yan-jian-cha",
+      "title": "64 帧光学测试与硬件冒烟检查",
+      "file": "6-64-zheng-guang-xue-ce-shi-yu-ying-jian-mou-yan-jian-cha.md",
+      "section": "快速上手",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "7-mo-kuai-hua-jia-gou-yu-yi-lai-fang-xiang-yue-shu",
+      "title": "模块化架构与依赖方向约束",
+      "file": "7-mo-kuai-hua-jia-gou-yu-yi-lai-fang-xiang-yue-shu.md",
+      "section": "深入解析",
+      "group": "模块化架构设计",
+      "level": "Advanced"
+    },
+    {
+      "slug": "8-profile-pei-zhi-mo-xing-yu-neng-li-sheng-ming",
+      "title": "Profile 配置模型与能力声明",
+      "file": "8-profile-pei-zhi-mo-xing-yu-neng-li-sheng-ming.md",
+      "section": "深入解析",
+      "group": "模块化架构设计",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "9-duan-kou-qi-yue-yu-zu-he-gen-yi-lai-zhu-ru",
+      "title": "端口契约与组合根依赖注入",
+      "file": "9-duan-kou-qi-yue-yu-zu-he-gen-yi-lai-zhu-ru.md",
+      "section": "深入解析",
+      "group": "模块化架构设计",
+      "level": "Advanced"
+    },
+    {
+      "slug": "10-shi-jian-zong-xian-gong-zuo-liu-zhuang-tai-ji-yu-xian-cheng-mo-xing",
+      "title": "事件总线、工作流状态机与线程模型",
+      "file": "10-shi-jian-zong-xian-gong-zuo-liu-zhuang-tai-ji-yu-xian-cheng-mo-xing.md",
+      "section": "深入解析",
+      "group": "模块化架构设计",
+      "level": "Advanced"
+    },
+    {
+      "slug": "11-jian-rong-gua-pei-ceng-yu-han-shang-sdk-yan-chi-jia-zai",
+      "title": "兼容适配层与厂商 SDK 延迟加载",
+      "file": "11-jian-rong-gua-pei-ceng-yu-han-shang-sdk-yan-chi-jia-zai.md",
+      "section": "深入解析",
+      "group": "模块化架构设计",
+      "level": "Advanced"
+    },
+    {
+      "slug": "12-gui-pei-zhi-re-qie-huan-yu-neng-li-qu-dong-kong-jian",
+      "title": "GUI 配置热切换与能力驱动控件",
+      "file": "12-gui-pei-zhi-re-qie-huan-yu-neng-li-qu-dong-kong-jian.md",
+      "section": "深入解析",
+      "group": "模块化架构设计",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "13-xiang-ji-dmd-hong-fa-shi-xu-yu-cai-ji-lian-lu",
+      "title": "相机–DMD 触发时序与采集链路",
+      "file": "13-xiang-ji-dmd-hong-fa-shi-xu-yu-cai-ji-lian-lu.md",
+      "section": "深入解析",
+      "group": "光学编码与数据流水线",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "14-dmd-chao-xiang-su-ying-she-ce-lue",
+      "title": "DMD 超像素映射策略",
+      "file": "14-dmd-chao-xiang-su-ying-she-ce-lue.md",
+      "section": "深入解析",
+      "group": "光学编码与数据流水线",
+      "level": "Advanced"
+    },
+    {
+      "slug": "15-quan-xi-bian-ma-qi-yu-cha-zhao-biao-ji-zhi",
+      "title": "全息编码器与查找表机制",
+      "file": "15-quan-xi-bian-ma-qi-yu-cha-zhao-biao-ji-zhi.md",
+      "section": "深入解析",
+      "group": "光学编码与数据流水线",
+      "level": "Advanced"
+    },
+    {
+      "slug": "16-da-gui-mo-probe-pattern-shu-ju-ji-sheng-cheng",
+      "title": "大规模 Probe/Pattern 数据集生成",
+      "file": "16-da-gui-mo-probe-pattern-shu-ju-ji-sheng-cheng.md",
+      "section": "深入解析",
+      "group": "光学编码与数据流水线",
+      "level": "Advanced"
+    },
+    {
+      "slug": "17-ce-liang-shu-ju-ge-shi-yu-pian-zhen-tong-dao-yue-ding",
+      "title": "测量数据格式与偏振通道约定",
+      "file": "17-ce-liang-shu-ju-ge-shi-yu-pian-zhen-tong-dao-yue-ding.md",
+      "section": "深入解析",
+      "group": "光学编码与数据流水线",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "18-fen-kuai-ggs2-1-chuan-shu-ju-zhen-zhong-jian",
+      "title": "分块 GGS2-1 传输矩阵重建",
+      "file": "18-fen-kuai-ggs2-1-chuan-shu-ju-zhen-zhong-jian.md",
+      "section": "深入解析",
+      "group": "重建与聚焦验证",
+      "level": "Advanced"
+    },
+    {
+      "slug": "19-complex32-hun-he-jing-du-wei-ni-qiu-jie",
+      "title": "Complex32 混合精度伪逆求解",
+      "file": "19-complex32-hun-he-jing-du-wei-ni-qiu-jie.md",
+      "section": "深入解析",
+      "group": "重建与聚焦验证",
+      "level": "Advanced"
+    },
+    {
+      "slug": "20-qiu-jie-qi-dui-bi-yu-di-jing-du-ji-zhun-gong-ju",
+      "title": "求解器对比与低精度基准工具",
+      "file": "20-qiu-jie-qi-dui-bi-yu-di-jing-du-ji-zhun-gong-ju.md",
+      "section": "深入解析",
+      "group": "重建与聚焦验证",
+      "level": "Advanced"
+    },
+    {
+      "slug": "21-bu-fen-tm-ju-jiao-ce-shi",
+      "title": "部分 TM 聚焦测试",
+      "file": "21-bu-fen-tm-ju-jiao-ce-shi.md",
+      "section": "深入解析",
+      "group": "重建与聚焦验证",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "22-quan-liang-zhu-xiang-su-ju-jiao-yu-pbr-bao-gao",
+      "title": "全量逐像素聚焦与 PBR 报告",
+      "file": "22-quan-liang-zhu-xiang-su-ju-jiao-yu-pbr-bao-gao.md",
+      "section": "深入解析",
+      "group": "重建与聚焦验证",
+      "level": "Advanced"
+    },
+    {
+      "slug": "23-ce-liang-zhi-liang-yu-qiang-du-zhen-duan-bao-gao",
+      "title": "测量质量与强度诊断报告",
+      "file": "23-ce-liang-zhi-liang-yu-qiang-du-zhen-duan-bao-gao.md",
+      "section": "深入解析",
+      "group": "重建与聚焦验证",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "24-32x24-shun-xu-ju-jiao-you-hua-yu-hdr-pbr-ce-liang",
+      "title": "32×24 顺序聚焦优化与 HDR PBR 测量",
+      "file": "24-32x24-shun-xu-ju-jiao-you-hua-yu-hdr-pbr-ce-liang.md",
+      "section": "深入解析",
+      "group": "重建与聚焦验证",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "25-shu-ju-guan-li-yu-shi-yan-gui-dang-gui-fan",
+      "title": "数据管理与实验归档规范",
+      "file": "25-shu-ju-guan-li-yu-shi-yan-gui-dang-gui-fan.md",
+      "section": "深入解析",
+      "group": "工程实践",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "26-ce-shi-ce-lue-yu-chi-xu-ji-cheng",
+      "title": "测试策略与持续集成",
+      "file": "26-ce-shi-ce-lue-yu-chi-xu-ji-cheng.md",
+      "section": "深入解析",
+      "group": "工程实践",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "27-fen-xi-yu-yan-zheng-gong-ju-ji-ji-notebook-gong-zuo-liu",
+      "title": "分析与验证工具集及 Notebook 工作流",
+      "file": "27-fen-xi-yu-yan-zheng-gong-ju-ji-ji-notebook-gong-zuo-liu.md",
+      "section": "深入解析",
+      "group": "工程实践",
+      "level": "Intermediate"
+    }
+  ]
+}

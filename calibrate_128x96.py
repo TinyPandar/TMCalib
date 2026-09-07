@@ -60,8 +60,11 @@ PATTERN_128X96_CONFIG = {
 }
 
 
-def get_active_128x96_pattern_config():
+def get_active_128x96_pattern_config(output_tag=None):
     """Return and validate the selected 128 x 96 pattern dataset."""
+    # The shared controller always supplies its optional output tag. This
+    # profile is not channelized, so the tag does not alter dataset filenames.
+    del output_tag
     active = PATTERN_128X96_CONFIG.get("active")
     datasets = PATTERN_128X96_CONFIG.get("sets", {})
     if active not in datasets:

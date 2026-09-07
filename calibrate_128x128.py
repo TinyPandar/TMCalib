@@ -170,6 +170,7 @@ class CameraHandler:
         self.save_path = save_path
         self.is_running = True
         self.image_queue = queue.Queue(maxsize=1)
+        self.measurement_frame_callback = None
         self.system = None
         self.cam = None
         self.pattern_lock = threading.Lock()
@@ -232,6 +233,16 @@ class CameraHandler:
     def publish_latest_image(self, frame_index, image):
         """Queue an owned image copy for the Tk camera view without blocking."""
         payload = (int(frame_index), np.array(image, copy=True))
+
+        # The modular Qt GUI receives completed measurement batches through a
+        # callback. Keep it best-effort so display failures never interrupt
+        # camera/DMD acquisition.
+        callback = self.measurement_frame_callback
+        if callback is not None:
+            try:
+                callback(payload[1])
+            except Exception as exc:
+                print("Measurement frame display callback failed: {}".format(exc))
 
         # The display only needs the newest completed batch.  Drop a stale
         # pending frame rather than ever slowing down the acquisition thread.
@@ -3354,6 +3365,7 @@ class DMDController:
         ds_method="mean",
         progress_callback=None,
         frame_callback=None,
+        stop_requested=None,
         output_dir=None,
         save_raw_images=True,
     ):
@@ -3432,11 +3444,15 @@ class DMDController:
         ok = 0
         last_img = None
         encoding_backends = set()
+        stopped = False
 
         batch_total = int(math.ceil(total / float(batch_size)))
         for batch_index, batch_start in enumerate(
             range(0, total, batch_size), start=1
         ):
+            if stop_requested is not None and stop_requested():
+                stopped = True
+                break
             batch_points = points[batch_start:batch_start + batch_size]
             batch_count = len(batch_points)
             target_indices = np.asarray(
@@ -3655,12 +3671,17 @@ class DMDController:
                 None,
             ),
             'last_image': last_img,
+            'stopped': stopped,
             'records': records,
             'report': report,
             'raw_images_path': raw_images_path,
             'focus_elapsed_seconds': focus_elapsed_seconds,
             'report_elapsed_seconds': report_elapsed_seconds,
-            'error': None if ok > 0 else 'All focus attempts failed'
+            'error': (
+                'Pixel-wise focusing stopped before completion'
+                if stopped
+                else None if ok > 0 else 'All focus attempts failed'
+            )
         }
 
     def pixelwise_focus_partial_tm_report(

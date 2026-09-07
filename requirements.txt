@@ -7,6 +7,5 @@ Pillow==10.4.0
 PySide6==6.6.3.1
 opencv-python==5.0.0.93
 tqdm==4.70.0
-scikit-image==0.21.0
 
 # PySpin and the JUOPT runtime are supplied by their hardware vendors.

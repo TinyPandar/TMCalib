@@ -1,0 +1,31 @@
+{
+  "profile": "TMCalib calibrate_v4_32x24",
+  "logical_input_shape": [
+    24,
+    32
+  ],
+  "logical_channel_count": 768,
+  "optimized_channel_count": 64,
+  "target_x": 64,
+  "target_y": 64,
+  "metric_radius": 0,
+  "phase_candidates_rad": [
+    0.0,
+    1.5707963705062866,
+    3.1415927410125732,
+    4.71238899230957
+  ],
+  "baseline_target_metric": 16.0,
+  "final_target_metric": 102.0,
+  "target_metric_gain": 6.375,
+  "ideal_phase_only_pbr_piN_over_4": 603.1857894892403,
+  "elapsed_s": 131.81927919387817,
+  "tmcalib_success": true,
+  "tmcalib_target_index": 8256,
+  "tmcalib_target_intensity": 102.0,
+  "tmcalib_peak_intensity": 193.0,
+  "tmcalib_peak_distance_px": 60.0,
+  "tmcalib_mean_intensity": 17.3538818359375,
+  "tmcalib_background_intensity": 17.322391510009766,
+  "tmcalib_pbr": 5.8883324476911385
+}

@@ -28,7 +28,7 @@ class FocusEncoding128x96Tests(unittest.TestCase):
 
     def test_profile_uses_98304_pattern_8n_dataset(self):
         module = importlib.import_module("calibrate_128x96")
-        config = module.get_active_128x96_pattern_config()
+        config = module.get_active_128x96_pattern_config(None)
         self.assertEqual(config["name"], "8N")
         self.assertEqual(config["probe_multiplier"], 8)
         self.assertEqual(

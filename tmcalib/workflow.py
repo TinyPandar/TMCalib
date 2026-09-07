@@ -26,6 +26,7 @@ class WorkflowState(str, Enum):
     MEASURING = "measuring"
     RECONSTRUCTING = "reconstructing"
     FOCUSING = "focusing"
+    PIXELWISE_FOCUSING = "pixelwise_focusing"
     ONE_CLICK = "one_click"
     STOPPING = "stopping"
     ERROR = "error"
@@ -88,6 +89,14 @@ class CalibrationWorkflow:
                     message=message,
                     progress=normalized,
                 )
+            )
+
+        return publish
+
+    def _frame(self, operation: str) -> Callable[[object], None]:
+        def publish(frame) -> None:
+            self.events.publish(
+                WorkflowEvent(EventKind.FRAME, operation, payload=frame)
             )
 
         return publish
@@ -183,7 +192,8 @@ class CalibrationWorkflow:
             "measurement",
             WorkflowState.MEASURING,
             lambda: self.services.measurement.run_measurement(
-                self._progress("measurement")
+                self._progress("measurement"),
+                self._frame("measurement"),
             ),
         )
 
@@ -208,11 +218,17 @@ class CalibrationWorkflow:
                     x, y, roi_w, roi_h
                 )
             )
-        return self._submit(
-            "focus",
-            WorkflowState.FOCUSING,
-            lambda: self.services.focus.focus(x, y),
-        )
+        def run() -> OperationResult:
+            result = self.services.focus.focus(x, y)
+            if isinstance(result, OperationResult) and isinstance(
+                result.payload, dict
+            ):
+                focused_image = result.payload.get("focused_image")
+                if focused_image is not None:
+                    self._frame("focus")(focused_image)
+            return result
+
+        return self._submit("focus", WorkflowState.FOCUSING, run)
 
     def one_click(self) -> Future:
         if not self.profile.supports("one_click"):
@@ -220,7 +236,8 @@ class CalibrationWorkflow:
 
         def run() -> OperationResult:
             measured = self.services.measurement.run_measurement(
-                self._progress("measurement")
+                self._progress("measurement"),
+                self._frame("measurement"),
             )
             if not measured.success:
                 return measured
@@ -230,11 +247,26 @@ class CalibrationWorkflow:
             if not reconstructed.success:
                 return reconstructed
             report = self.services.focus.run_pixelwise_report(
-                self._progress("pixelwise_report")
+                self._progress("pixelwise_report"),
+                self._frame("pixelwise_report"),
             )
             return report
 
         return self._submit("one_click", WorkflowState.ONE_CLICK, run)
+
+    def pixelwise_report(self) -> Future:
+        if not self.profile.supports("pixelwise_report"):
+            raise RuntimeError(
+                "Pixel-wise focusing is unavailable for this profile"
+            )
+        return self._submit(
+            "pixelwise_report",
+            WorkflowState.PIXELWISE_FOCUSING,
+            lambda: self.services.focus.run_pixelwise_report(
+                self._progress("pixelwise_report"),
+                self._frame("pixelwise_report"),
+            ),
+        )
 
     def stop(self) -> None:
         current = self.state
@@ -243,6 +275,44 @@ class CalibrationWorkflow:
         self._set_state(WorkflowState.STOPPING, "stop")
         self.services.cancellation.stop_all()
         self._log("stop", "Stop requested; waiting for the active operation")
+
+    def disconnect(self) -> Future:
+        """Release hardware on the serialized worker without blocking the UI."""
+        with self._lock:
+            if self._state not in (WorkflowState.IDLE, WorkflowState.ERROR):
+                raise RuntimeError(
+                    "Cannot disconnect while workflow state is {}".format(
+                        self._state.value
+                    )
+                )
+            self._set_state(WorkflowState.STOPPING, "disconnect")
+
+        def release() -> OperationResult:
+            self._log("disconnect", "Releasing camera and DMD")
+            try:
+                self.services.cancellation.stop_all()
+                self.services.camera.stop_preview()
+                self.services.lifecycle.close()
+                result = OperationResult(True, "Camera and DMD disconnected")
+                self._set_state(WorkflowState.CLOSED, "disconnect", result.message)
+                self._log("disconnect", "Camera and DMD released")
+                return result
+            except Exception as exc:
+                message = str(exc)
+                self._set_state(WorkflowState.ERROR, "disconnect", message)
+                self.events.publish(
+                    WorkflowEvent(EventKind.ERROR, "disconnect", message=message)
+                )
+                raise
+
+        future = self._executor.submit(release)
+        with self._lock:
+            self._active_future = future
+        if self._owns_executor:
+            future.add_done_callback(
+                lambda _future: self._executor.shutdown(wait=False)
+            )
+        return future
 
     def close(self) -> None:
         if self.state == WorkflowState.CLOSED:

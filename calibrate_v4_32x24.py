@@ -99,6 +99,7 @@ class CameraHandler:
         self.save_path = save_path
         self.is_running = True
         self.image_queue = queue.Queue(maxsize=1)
+        self.measurement_frame_callback = None
         self.system = None
         self.cam = None
         self.pattern_lock = threading.Lock()
@@ -154,6 +155,33 @@ class CameraHandler:
         self.configure_gain(gain=0)
         self.configure_buffer_handling()
         self.configure_trigger()
+
+    def publish_latest_image(self, frame_index, image):
+        """Publish one owned batch image without delaying acquisition."""
+        payload = (int(frame_index), np.array(image, copy=True))
+
+        callback = self.measurement_frame_callback
+        if callback is not None:
+            try:
+                callback(payload[1])
+            except Exception as exc:
+                print("Measurement frame display callback failed: {}".format(exc))
+
+        try:
+            self.image_queue.put_nowait(payload)
+            return
+        except queue.Full:
+            pass
+
+        try:
+            self.image_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        try:
+            self.image_queue.put_nowait(payload)
+        except queue.Full:
+            pass
 
     def configure_roi(self):
         """Configure a centered 256x256 raw ROI for a 128x128 polar image."""
@@ -1240,6 +1268,11 @@ class DMDController:
             roi = img[:, :roi_h, :roi_w] if img.shape[1] >= roi_h and img.shape[2] >= roi_w else img
             meas_mm[m:m+batch_count, :] = roi.reshape(batch_count, -1).astype('uint16')
 
+            # Display the final speckle from this completed batch. The camera
+            # owns the copy and forwards it to either the legacy Tk view or the
+            # modular Qt workflow without blocking acquisition.
+            self.camera.publish_latest_image(m + batch_count, roi[-1])
+
             # Progress update
             if (m + batch_count) % 1000 == 0 or m == 0:
                 print(f"Measured up to {m + batch_count}/{M} probes")
@@ -1253,10 +1286,18 @@ class DMDController:
                     f"Measuring probes: {m + batch_count}/{M} | Stability Corr: {corr_txt}"
                 )
 
+        # A normal run reaches this point while optimization_running is still
+        # true. A user stop clears it, so callers can reject the partial file.
+        completed = bool(self.optimization_running)
+
         # flush memmap to disk
         del meas_mm
-        print("Measurement phase completed.")
-        self.optimization_running = False
+        print(
+            "Measurement phase completed."
+            if completed
+            else "Measurement phase stopped before completion."
+        )
+        return completed
 
     # def run_reconstruction(self):
     #     self.reconstruction_running = True
@@ -2889,6 +2930,7 @@ class DMDController:
         ds_method='mean',
         progress_callback=None,
         frame_callback=None,
+        stop_requested=None,
         output_dir=None,
     ):
         """
@@ -2933,12 +2975,16 @@ class DMDController:
         ok = 0
         last_img = None
         encoding_backends = set()
+        stopped = False
 
         batch_total = int(math.ceil(total / float(batch_size)))
         for batch_index, batch_start in enumerate(
             range(0, total, batch_size),
             start=1,
         ):
+            if stop_requested is not None and stop_requested():
+                stopped = True
+                break
             batch_points = points[batch_start:batch_start + batch_size]
             batch_count = len(batch_points)
             target_indices = np.asarray(
@@ -3127,9 +3173,14 @@ class DMDController:
                 None,
             ),
             'last_image': last_img,
+            'stopped': stopped,
             'records': records,
             'report': report,
-            'error': None if ok > 0 else 'All focus attempts failed'
+            'error': (
+                'Pixel-wise focusing stopped before completion'
+                if stopped
+                else None if ok > 0 else 'All focus attempts failed'
+            )
         }
 
     def conjugate_focus_at_position_multi_phase(
