@@ -1,0 +1,13 @@
+{
+  "pattern_set": "8N",
+  "probe_index": 0,
+  "exposure_us": 1503.0,
+  "gain_db": 0.0,
+  "target_fps": 500.0,
+  "roi": [
+    548,
+    448,
+    128,
+    128
+  ]
+}

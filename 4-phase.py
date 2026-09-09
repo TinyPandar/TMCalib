@@ -25,6 +25,17 @@ warnings.filterwarnings('ignore')
 TARGET_ACQUISITION_FPS = 500.0
 CAMERA_EXPOSURE_US = 1500.0
 
+# Exposure is reduced automatically when any captured 8-bit frame becomes too
+# bright. It is intentionally never increased: at 500 Hz a longer exposure can
+# overrun the 2000 us DMD trigger period. Whenever it changes, the complete DMD
+# sequence is captured again at the new exposure.
+AUTO_EXPOSURE_ENABLED = True
+AUTO_EXPOSURE_MIN_US = 50.0
+AUTO_EXPOSURE_TARGET_PEAK = 150.0
+AUTO_EXPOSURE_SATURATION_THRESHOLD = 235.0
+AUTO_EXPOSURE_SAFETY_FACTOR = 0.90
+AUTO_EXPOSURE_MAX_ADJUSTMENTS = 8
+
 # =============================================================================
 # Numba 加速全息图生成
 # =============================================================================
@@ -306,6 +317,8 @@ class CameraHandler:
         self.trigger_enabled = trigger_enabled
         self.last_error_time = 0
         self.trigger_ready = threading.Event()
+        self.current_exposure_us = None
+        self.exposure_revision = 0
         
         self.roi_x = 296
         self.roi_y = 206
@@ -491,16 +504,40 @@ class CameraHandler:
             node_timed = node_exposure_mode.GetEntryByName('Timed')
             node_exposure_mode.SetIntValue(node_timed.GetValue())
             node_exposure_time = PySpin.CFloatPtr(nodemap.GetNode('ExposureTime'))
-            node_exposure_time.SetValue(float(exposure_time))
+            requested_exposure = float(exposure_time)
+            clamped_exposure = float(np.clip(
+                requested_exposure,
+                float(node_exposure_time.GetMin()),
+                float(node_exposure_time.GetMax()),
+            ))
+            node_exposure_time.SetValue(clamped_exposure)
             actual_exposure = float(node_exposure_time.GetValue())
+            previous_exposure = self.current_exposure_us
+            self.current_exposure_us = actual_exposure
+            if (
+                previous_exposure is None
+                or not np.isclose(previous_exposure, actual_exposure)
+            ):
+                self.exposure_revision += 1
             print(
                 f"曝光时间设置为 {actual_exposure:.1f} us "
-                f"(requested {float(exposure_time):.1f} us)"
+                f"(requested {requested_exposure:.1f} us)"
             )
             return True
         except PySpin.SpinnakerException as ex:
             print(f'配置曝光错误: {ex}')
             return False
+
+    def get_exposure_us(self):
+        """Return the camera's actual exposure, falling back to the last value."""
+        if not self.cam:
+            return self.current_exposure_us
+        try:
+            exposure = float(self.cam.ExposureTime.GetValue())
+            self.current_exposure_us = exposure
+            return exposure
+        except Exception:
+            return self.current_exposure_us
 
     def configure_gain(self, auto_gain='Off', gain=0):
         if not self.cam:
@@ -769,9 +806,22 @@ class DMDController:
         self.focus_pos = (self.roi_width // 2, self.roi_height // 2)
         
         self.dmd_frame_rate = TARGET_ACQUISITION_FPS
+
+        self.auto_exposure_enabled = AUTO_EXPOSURE_ENABLED
+        self.auto_exposure_min_us = AUTO_EXPOSURE_MIN_US
+        self.auto_exposure_target_peak = AUTO_EXPOSURE_TARGET_PEAK
+        self.auto_exposure_saturation_threshold = (
+            AUTO_EXPOSURE_SATURATION_THRESHOLD
+        )
+        self.auto_exposure_safety_factor = AUTO_EXPOSURE_SAFETY_FACTOR
+        self.auto_exposure_max_adjustments = AUTO_EXPOSURE_MAX_ADJUSTMENTS
+        self._fitness_exposure_revision = getattr(
+            self.camera, 'exposure_revision', 0
+        )
         
-        self.tm_path = 'C:\\Users\\1\\Desktop\\pyDMDholo-main\\holograms\\reconstructed_field.npy'
-        self.use_tm_init = True
+        # Pure GA-ACO benchmark: do not seed the population from a measured TM.
+        self.tm_path = None
+        self.use_tm_init = False
         
         self.maxIter = 5000
         self.pop_size = 40
@@ -1179,6 +1229,26 @@ class DMDController:
             return False
         return True
 
+    def _choose_lower_exposure(self, current_exposure_us, observed_peak):
+        """Choose a lower exposure that should put the 8-bit peak near target."""
+        if observed_peak <= 0:
+            return float(current_exposure_us)
+        proposed = (
+            float(current_exposure_us)
+            * (self.auto_exposure_target_peak / float(observed_peak))
+            * self.auto_exposure_safety_factor
+        )
+        # Make meaningful progress even when the peak is only slightly high.
+        proposed = min(proposed, float(current_exposure_us) * 0.85)
+        return max(float(self.auto_exposure_min_us), proposed)
+
+    @staticmethod
+    def _sequence_peak(images):
+        valid_images = [image for image in images if image is not None]
+        if not valid_images:
+            return None
+        return max(float(np.max(image)) for image in valid_images)
+
     def project_and_capture(self, patterns=None):
         if not self.is_init:
             return None
@@ -1191,44 +1261,111 @@ class DMDController:
         if patterns.ndim == 2:
             patterns = patterns[np.newaxis, ...]
         batch = patterns.shape[0]
-        if not self.load_pattern(patterns):
-            return None if batch == 1 else [None]*batch
-
-        images = []
-        camera_started = False
-        try:
-            if self.camera:
-                self.camera.start()
-                camera_started = True
-
-            result = self.DMD.juoptProjection(self.dev_id, 0, 0)
-            if result != 0:
-                print('juoptProjection failed: {}'.format(result))
+        adjustment_count = 0
+        while True:
+            if not self.load_pattern(patterns):
                 return None if batch == 1 else [None] * batch
 
-            for i in range(batch):
-                img = self.camera.run() if self.camera else None
-                images.append(img)
-                if img is not None and self.camera:
-                    try:
-                        while not self.camera.image_queue.empty():
-                            self.camera.image_queue.get_nowait()
-                        self.camera.image_queue.put((i, img), block=False)
-                    except queue.Full:
-                        pass
-        finally:
+            images = []
+            camera_started = False
+            projection_started = False
             try:
-                self.DMD.juoptStop(self.dev_id)
-            except Exception as exc:
-                print('juoptStop failed: {}'.format(exc))
-            if camera_started:
-                try:
-                    self.camera.stop()
-                except Exception as exc:
-                    print('Camera stop failed: {}'.format(exc))
-            self.clear_sequence(0)
+                if self.camera:
+                    self.camera.start()
+                    camera_started = True
 
-        return images[0] if batch == 1 else images
+                result = self.DMD.juoptProjection(self.dev_id, 0, 0)
+                if result != 0:
+                    print('juoptProjection failed: {}'.format(result))
+                    return None if batch == 1 else [None] * batch
+                projection_started = True
+
+                for i in range(batch):
+                    img = self.camera.run() if self.camera else None
+                    images.append(img)
+                    if img is not None and self.camera:
+                        try:
+                            while not self.camera.image_queue.empty():
+                                self.camera.image_queue.get_nowait()
+                            self.camera.image_queue.put((i, img), block=False)
+                        except queue.Full:
+                            pass
+            finally:
+                if projection_started:
+                    try:
+                        self.DMD.juoptStop(self.dev_id)
+                    except Exception as exc:
+                        print('juoptStop failed: {}'.format(exc))
+                if camera_started:
+                    try:
+                        self.camera.stop()
+                    except Exception as exc:
+                        print('Camera stop failed: {}'.format(exc))
+                self.clear_sequence(0)
+
+            observed_peak = self._sequence_peak(images)
+            if (
+                not self.auto_exposure_enabled
+                or self.camera is None
+                or observed_peak is None
+            ):
+                return images[0] if batch == 1 else images
+
+            current_exposure = self.camera.get_exposure_us()
+            if current_exposure is None:
+                return images[0] if batch == 1 else images
+
+            can_reduce = current_exposure > self.auto_exposure_min_us + 1e-9
+            if observed_peak > self.auto_exposure_target_peak and can_reduce:
+                new_exposure = self._choose_lower_exposure(
+                    current_exposure, observed_peak
+                )
+                if (
+                    new_exposure < current_exposure - 1e-9
+                    and adjustment_count < self.auto_exposure_max_adjustments
+                ):
+                    print(
+                        f"[Auto Exposure] sequence max={observed_peak:.1f}; "
+                        f"{current_exposure:.1f} us -> {new_exposure:.1f} us; "
+                        f"重拍全部 {batch} 帧"
+                    )
+                    if not self.camera.configure_exposure(new_exposure):
+                        self.optimization_running = False
+                        raise RuntimeError("自适应曝光设置失败")
+                    actual_exposure = self.camera.get_exposure_us()
+                    if (
+                        actual_exposure is None
+                        or actual_exposure >= current_exposure - 1e-9
+                    ):
+                        if observed_peak >= self.auto_exposure_saturation_threshold:
+                            self.optimization_running = False
+                            raise RuntimeError(
+                                f"相机无法继续降低曝光，当前峰值 "
+                                f"max={observed_peak:.1f}，请降低入射光功率"
+                            )
+                        print("[Auto Exposure] 相机已无法继续降低曝光")
+                        return images[0] if batch == 1 else images
+                    adjustment_count += 1
+                    continue
+
+                if adjustment_count >= self.auto_exposure_max_adjustments:
+                    self.optimization_running = False
+                    raise RuntimeError(
+                        "自适应曝光调整次数超过上限，"
+                        f"当前 max={observed_peak:.1f}"
+                    )
+
+            if (
+                observed_peak >= self.auto_exposure_saturation_threshold
+                and not can_reduce
+            ):
+                self.optimization_running = False
+                raise RuntimeError(
+                    f"最低曝光 {current_exposure:.1f} us 下仍接近饱和 "
+                    f"(max={observed_peak:.1f})，请降低入射光功率"
+                )
+
+            return images[0] if batch == 1 else images
 
     def calculate_pbr(self, raw_image):
         try:
@@ -1259,6 +1396,12 @@ class DMDController:
         if not isinstance(gen_array, np.ndarray):
             gen_array = np.array(gen_array)
         N_in, n = gen_array.shape
+        current_exposure_revision = getattr(
+            self.camera, 'exposure_revision', 0
+        )
+        if current_exposure_revision != self._fitness_exposure_revision:
+            self.pop_fitness_cache.clear()
+            self._fitness_exposure_revision = current_exposure_revision
         Ny, Nx = self.dmd_height, self.dmd_width
         masks = gen_array.T.reshape(n, Ny, Nx)
         
@@ -1278,6 +1421,14 @@ class DMDController:
             batch_masks = np.stack(need_eval_masks, axis=0)
             batch_patterns = self.batch_holograms_from_masks(batch_masks)
             images = self.project_and_capture(batch_patterns)
+            final_exposure_revision = getattr(
+                self.camera, 'exposure_revision', current_exposure_revision
+            )
+            if final_exposure_revision != self._fitness_exposure_revision:
+                # All images returned above were re-captured at the final
+                # exposure, so only older cached measurements are invalid.
+                self.pop_fitness_cache.clear()
+                self._fitness_exposure_revision = final_exposure_revision
             
             if images is None:
                 images = []
@@ -1331,9 +1482,19 @@ class DMDController:
             self.mut_iterations = []
             self.pop_fitness_cache.clear()
             self.last_full_eval_gen = 0
-            thread = threading.Thread(target=self.run_optimization)
+            thread = threading.Thread(target=self._optimization_worker)
             thread.daemon = True
             thread.start()
+
+    def _optimization_worker(self):
+        try:
+            self.run_optimization()
+        except Exception as exc:
+            print(f"[Optimization] 异常终止: {exc}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.optimization_running = False
 
     def stop_optimization(self):
         self.optimization_running = False
@@ -1508,11 +1669,28 @@ class DMDController:
                 # ========== r 稳定：增量评估模式 ==========
                 # 父代 fitness 可信，直接复用
                 
+                exposure_revision_before = getattr(
+                    self.camera, 'exposure_revision', 0
+                )
                 Cost_off = self._evaluate_population(offs, force_full_eval=False)
+                exposure_revision_after = getattr(
+                    self.camera, 'exposure_revision', exposure_revision_before
+                )
                 
                 # 合并
                 allGen = np.concatenate([Gen, offs], axis=1)
-                allCost = np.concatenate([Cost, Cost_off])
+                if exposure_revision_after != exposure_revision_before:
+                    # Parent fitness was measured at the previous exposure.
+                    # Re-measure all parents and offspring before ranking them.
+                    print(
+                        "[Auto Exposure] 曝光已变更，重新测量父代+后代"
+                    )
+                    allCost = self._evaluate_population(
+                        allGen, force_full_eval=True
+                    )
+                    self.last_full_eval_gen = iGen
+                else:
+                    allCost = np.concatenate([Cost, Cost_off])
             
             # ==================== 选择下一代父代 ====================
             sort_idx_all = np.argsort(allCost)[::-1]

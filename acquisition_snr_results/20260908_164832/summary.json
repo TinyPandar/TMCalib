@@ -1,0 +1,31 @@
+{
+  "frames": 100,
+  "background_frames": 100,
+  "background_kind": "black DMD bitmap, not shuttered sensor dark",
+  "metric": "single-frame temporal SNR; no drift removal",
+  "valid_pixels": 16067,
+  "total_pixels": 16384,
+  "saturated_pixel_fraction": 0.0,
+  "zero_temporal_std_pixel_fraction": 0.01934814453125,
+  "mean_dn": 6.681719360351563,
+  "black_background_mean_dn": 0.00075439453125,
+  "background_subtracted_roi_snr_db": 24.525859161165013,
+  "raw_roi_snr_db_same_mask": 24.52648477973984,
+  "pixel_snr_db_percentiles_10_50_90": [
+    14.683901485068874,
+    21.693453785339536,
+    26.969731728059138
+  ],
+  "temporal_noise_rms_dn": 0.5014968231009527,
+  "pattern_set": "8N",
+  "probe_index": 0,
+  "exposure_us": 1503.0,
+  "gain_db": 0.0,
+  "target_fps": 500.0,
+  "roi": [
+    548,
+    448,
+    128,
+    128
+  ]
+}

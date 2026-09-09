@@ -44,6 +44,7 @@ from measurement_quality_report import (
     build_measurement_quality_figure,
     save_measurement_quality_outputs,
 )
+from tmcalib.focus_modes import prepare_conjugate_focus_field
 
 try:
     import paramiko
@@ -60,7 +61,7 @@ CAMERA_EXPOSURE_US = 1500.0
 # Pre-generated 32 x 24 pattern dataset selection. Change only ``active`` to
 # switch datasets; the probe count and reconstruction input are kept in sync.
 PATTERN_CONFIG = {
-    "active": "8N",
+    "active": "20N_4PHASE",
     "sets": {
         "4N": {
             "directory": "pregenerated_patterns",
@@ -70,6 +71,45 @@ PATTERN_CONFIG = {
             "directory": "pregenerated_patterns_8N",
             "probe_multiplier": 8,
         },
+        "12N": {
+            "directory": "pregenerated_patterns_v4_phase_only_12N",
+            "probe_multiplier": 12,
+        },
+        "12N_4PHASE": {
+            "directory": "pregenerated_patterns_v4_phase_only_4level_12N",
+            "probe_multiplier": 12,
+            "output_tag": "32x24_12N_4phase",
+        },
+        "12N_16PHASE": {
+            "directory": "pregenerated_patterns_v4_phase_only_16level_12N",
+            "probe_multiplier": 12,
+            "output_tag": "32x24_12N_16phase",
+        },
+        "12N_32PHASE": {
+            "directory": "pregenerated_patterns_v4_phase_only_32level_12N",
+            "probe_multiplier": 12,
+            "output_tag": "32x24_12N_32phase",
+        },
+        "20N_4PHASE": {
+            "directory": "pregenerated_patterns_v4_phase_only_4level_20N",
+            "probe_multiplier": 20,
+            "output_tag": "32x24_20N_4phase",
+        },
+    },
+}
+
+# Focus input selection. ``complex`` is the previous behavior,
+# ``phase_only`` retains the reconstructed phase at unit amplitude;
+# ``phase_only_2`` and ``phase_only_4`` quantize it to 2 or 4 phase levels;
+# ``amplitude_only_binary`` selects an on/off mask with a common zero phase.
+FOCUS_CONFIG = {
+    "active": "phase_only",
+    "modes": {
+        "complex": {},
+        "phase_only": {},
+        "phase_only_2": {"phase_levels": 2},
+        "phase_only_4": {"phase_levels": 4},
+        "amplitude_only_binary": {},
     },
 }
 
@@ -91,7 +131,48 @@ def get_active_pattern_config():
         config["directory"],
     )
     config["probe_multiplier"] = int(config["probe_multiplier"])
+    output_tag = config.get("output_tag")
+    config["measurement_filename"] = (
+        f"measurements_{output_tag}_memmap.npy"
+        if output_tag else "measurements_memmap.npy"
+    )
+    config["tm_memmap_filename"] = (
+        f"transmission_matrix_{output_tag}_memmap.npy"
+        if output_tag else "transmission_matrix_memmap.npy"
+    )
+    config["reconstructed_filename"] = (
+        f"reconstructed_field_{output_tag}.npy"
+        if output_tag else "reconstructed_field.npy"
+    )
+    config["error_curve_filename"] = (
+        f"ggs21_error_curve_{output_tag}.npy"
+        if output_tag else "ggs21_error_curve.npy"
+    )
     return config
+
+
+def get_active_focus_config():
+    """Return and validate the selected TM focus input policy."""
+    active = FOCUS_CONFIG.get("active")
+    modes = FOCUS_CONFIG.get("modes", {})
+    if active not in modes:
+        available = ", ".join(sorted(modes)) or "<none>"
+        raise ValueError(
+            f"Unknown focus mode {active!r}; available modes: {available}"
+        )
+    config = dict(modes[active])
+    config["name"] = active
+    return config
+
+
+def build_conjugate_focus_field(tm_values):
+    """Apply the configured focus policy before DMD LUT encoding."""
+    config = get_active_focus_config()
+    return prepare_conjugate_focus_field(
+        tm_values,
+        mode=config["name"],
+        phase_levels=config.get("phase_levels"),
+    )
 
 class CameraHandler:
     def __init__(self, cam_index, save_path):
@@ -643,9 +724,11 @@ class DMDController:
         self.reconstruction_error = None
         # Keep recovery file names configurable so algorithm variants can use
         # the same acquisition/focusing workflow without overwriting results.
-        self.tm_memmap_filename = "transmission_matrix_memmap.npy"
-        self.reconstructed_filename = "reconstructed_field.npy"
-        self.error_curve_filename = "ggs21_error_curve.npy"
+        pattern_config = get_active_pattern_config()
+        self.measurement_filename = pattern_config["measurement_filename"]
+        self.tm_memmap_filename = pattern_config["tm_memmap_filename"]
+        self.reconstructed_filename = pattern_config["reconstructed_filename"]
+        self.error_curve_filename = pattern_config["error_curve_filename"]
         self.current_pbr = 0
         self.current_peak_intensity = 0
         self.current_stability_corr = None  # Pearson correlation vs baseline white-speckle
@@ -1127,7 +1210,10 @@ class DMDController:
         M = N_in * pattern_config["probe_multiplier"]
 
         # Files for measurements
-        meas_file = os.path.join(os.getcwd(), 'measurements_memmap.npy')
+        meas_file = os.path.join(
+            os.getcwd(),
+            pattern_config["measurement_filename"],
+        )
 
         print(
             f"Starting measurement phase: N_in={N_in}, N_out={N_out}, "
@@ -1452,7 +1538,7 @@ class DMDController:
 
             meas_file = os.path.join(
                 base_dir,
-                "measurements_memmap.npy"
+                pattern_config["measurement_filename"],
             )
 
             H_file = os.path.join(
@@ -1974,7 +2060,7 @@ class DMDController:
 
             # 3. 提取对应的传输矩阵列并进行共轭
             h_column = H[col_index, :]  # 形状: (N_in,)
-            h_conjugate = np.conj(h_column)  # 共轭
+            h_conjugate = build_conjugate_focus_field(h_column)
             print(f"提取的传输矩阵列形状: {h_column.shape}")
             print(f"共轭后的列形状: {h_conjugate.shape}")
 
@@ -2055,31 +2141,22 @@ class DMDController:
             print(f"捕获图像数据类型: {captured_image.dtype}")
             print(f"捕获图像范围: [{np.min(captured_image)}, {np.max(captured_image)}]")
 
-            # 9. 分析聚焦效果
+            # 9. 分析聚焦效果：采用四相位 PBR 算法，峰值区域扩大为 10×10
             if len(captured_image.shape) == 3:
-                captured_image = np.mean(captured_image, axis=2)
+                captured_image = captured_image[:, :, 0]
 
-            # peak_intensity = captured_image[target_x, target_y]
-            peak_intensity = np.max(captured_image)
-            mean_intensity = (np.sum(captured_image) - peak_intensity)/(captured_image.size - 1)
+            roi_height, roi_width = captured_image.shape
+            x = int(np.clip(target_x, 5, roi_width - 5))
+            y = int(np.clip(target_y, 5, roi_height - 5))
+            peak_region = captured_image[y-5:y+5, x-5:x+5]
+            peak_intensity = np.max(peak_region).item()
+            mean_intensity = (np.sum(captured_image) - np.max(captured_image)) / (captured_image.size - 1)
 
-            # 计算背景强度：排除峰值区域后的平均强度
-            # 使用图像边缘区域作为背景估计
-            edge_size = 10  # 边缘像素数
-            if captured_image.shape[0] > 2*edge_size and captured_image.shape[1] > 2*edge_size:
-                # 使用图像边缘的像素计算背景强度
-                background_pixels = np.concatenate([
-                    captured_image[:edge_size, :].flatten(),  # 上边缘
-                    captured_image[-edge_size:, :].flatten(),  # 下边缘
-                    captured_image[:, :edge_size].flatten(),  # 左边缘
-                    captured_image[:, -edge_size:].flatten()  # 右边缘
-                ])
-                background_intensity = np.mean(background_pixels)
-            else:
-                # 如果图像太小，使用整体平均值作为背景
-                background_intensity = mean_intensity
-
-            pbr = peak_intensity / background_intensity if background_intensity > 0 else 0
+            # 背景为排除目标位置 10×10 区域后的其余像素。
+            bg_mask = np.ones_like(captured_image, dtype=bool)
+            bg_mask[y-5:y+5, x-5:x+5] = False
+            background_intensity = max(captured_image[bg_mask].mean().item(), 1e-6)
+            pbr = peak_intensity / background_intensity
 
             print("\n" + "="*70)
             print("聚焦结果分析")
@@ -2132,7 +2209,7 @@ class DMDController:
         if not np.all(np.isfinite(tm_row)):
             raise ValueError('TM row contains NaN or infinity')
 
-        input_field = np.conj(tm_row).reshape(
+        input_field = build_conjugate_focus_field(tm_row).reshape(
             self.dmd_height, self.dmd_width
         )
         full_pattern = np.kron(
@@ -2326,7 +2403,7 @@ class DMDController:
             valid_local_indices = np.flatnonzero(valid_mask)
             if valid_local_indices.size:
                 valid_rows = chunk_rows[valid_local_indices]
-                fields = np.conj(valid_rows).reshape(
+                fields = build_conjugate_focus_field(valid_rows).reshape(
                     -1,
                     self.dmd_height,
                     self.dmd_width,
@@ -2503,13 +2580,15 @@ class DMDController:
                 valid_local_indices = np.flatnonzero(valid_mask)
                 if valid_local_indices.size:
                     valid_rows = np.ascontiguousarray(
-                        chunk_rows[valid_local_indices]
+                        build_conjugate_focus_field(
+                            chunk_rows[valid_local_indices]
+                        )
                     )
                     rows_tensor = torch.as_tensor(
                         valid_rows,
                         device=device,
                     )
-                    fields = torch.conj(rows_tensor).reshape(
+                    fields = rows_tensor.reshape(
                         -1,
                         self.dmd_height,
                         self.dmd_width,
@@ -2778,7 +2857,7 @@ class DMDController:
                 raise ValueError('TM row contains NaN or infinity')
 
             result['target_index'] = target_y * roi_w + target_x
-            input_field = np.conj(tm_row).reshape(
+            input_field = build_conjugate_focus_field(tm_row).reshape(
                 self.dmd_height, self.dmd_width
             )
             full_pattern = np.kron(
@@ -2942,6 +3021,7 @@ class DMDController:
         - progress_callback: fn(done:int, total:int, message:str)
         - frame_callback: fn(image:ndarray, record:dict)，每次成功采集后调用
         """
+        focus_mode = get_active_focus_config()["name"]
         H = self._load_transmission_matrix()
         self._focus_gpu_failed = False
         self.last_focus_encoding_fallback_error = None
@@ -3155,8 +3235,8 @@ class DMDController:
             records,
             roi_shape=(roi_h, roi_w),
             output_dir=output_dir,
-            run_label='stride{}_batch{}_n{}'.format(
-                stride, batch_size, total
+            run_label='{}_stride{}_batch{}_n{}'.format(
+                focus_mode, stride, batch_size, total
             ),
             file_prefix='pixelwise_focus_v4',
         )
@@ -3166,6 +3246,7 @@ class DMDController:
             'count': ok,
             'total': total,
             'batch_size': batch_size,
+            'focus_mode': focus_mode,
             'encoding_backend': ' + '.join(sorted(encoding_backends)),
             'encoding_fallback_error': getattr(
                 self,
@@ -3225,7 +3306,7 @@ class DMDController:
 
         col_index = target_y * roi_w + target_x
         h_column = H[col_index, :]
-        h_conjugate = np.conj(h_column)
+        h_conjugate = build_conjugate_focus_field(h_column)
 
         N_x = self.dmd_width
         N_y = self.dmd_height
@@ -3804,7 +3885,8 @@ class Application(tk.Tk):
                     ),
                 )
                 measurement_path = os.path.join(
-                    os.getcwd(), "measurements_memmap.npy"
+                    os.getcwd(),
+                    self.dmd_controller.measurement_filename,
                 )
                 sensor_max_count = (
                     4095 if self.camera.convert_to_12bit else 255
@@ -3958,8 +4040,14 @@ class Application(tk.Tk):
             return
 
         # 本地/远端路径和服务器配置 —— 请根据你的实际服务器情况修改
-        local_meas_file = os.path.join(os.getcwd(), "measurements_memmap.npy")
-        local_tm_file = os.path.join(os.getcwd(), "reconstructed_field.npy")
+        local_meas_file = os.path.join(
+            os.getcwd(),
+            self.dmd_controller.measurement_filename,
+        )
+        local_tm_file = os.path.join(
+            os.getcwd(),
+            self.dmd_controller.reconstructed_filename,
+        )
 
         ssh_host = "10.102.137.157"
         ssh_port = 22

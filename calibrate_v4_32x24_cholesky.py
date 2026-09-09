@@ -13,6 +13,7 @@ import torch
 
 from calibrate_v4_32x24 import Application as _V4Application
 from calibrate_v4_32x24 import DMDController as _V4DMDController
+from calibrate_v4_32x24 import get_active_pattern_config
 
 
 class DMDController(_V4DMDController):
@@ -23,10 +24,20 @@ class DMDController(_V4DMDController):
 
         # Do not overwrite the ordinary pinv-based recovery.  The inherited
         # focusing methods read ``self.reconstructed_filename``.
-        self.tm_memmap_filename = "transmission_matrix_memmap_cholesky.npy"
-        self.reconstructed_filename = "reconstructed_field_cholesky.npy"
-        self.error_curve_filename = "ggs21_error_curve_cholesky.npy"
-        self.ggs21_cholesky_factor_filename = "probe_cholesky_v4.npy"
+        output_tag = get_active_pattern_config().get("output_tag")
+        tag_suffix = "_{}".format(output_tag) if output_tag else ""
+        self.tm_memmap_filename = (
+            "transmission_matrix{}_memmap_cholesky.npy".format(tag_suffix)
+        )
+        self.reconstructed_filename = (
+            "reconstructed_field{}_cholesky.npy".format(tag_suffix)
+        )
+        self.error_curve_filename = (
+            "ggs21_error_curve{}_cholesky.npy".format(tag_suffix)
+        )
+        self.ggs21_cholesky_factor_filename = (
+            "probe_cholesky_v4{}.npy".format(tag_suffix)
+        )
 
         # Zero ridge makes this a controlled factorization-only comparison
         # against pinv(X). Increase this value only if the Gram matrix is not
