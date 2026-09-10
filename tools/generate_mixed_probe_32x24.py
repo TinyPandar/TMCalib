@@ -90,7 +90,7 @@ def generate(output_dir, seed=DEFAULT_SEED, batch_size=DEFAULT_BATCH_SIZE):
         for group_start, group_stop in ((0, group_boundary), (group_boundary, count)):
             for start in range(group_start, group_stop, int(batch_size)):
                 stop = min(start + int(batch_size), group_stop)
-            size = stop - start
+                size = stop - start
                 if group_start == 0:
                     requested = np.exp(1j * rng.uniform(-np.pi, np.pi, (size, N_Y, N_X)))
                     group = "fixed_amplitude_random_phase"
