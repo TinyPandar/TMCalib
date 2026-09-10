@@ -33,6 +33,7 @@ from tmcalib.events import EventKind, WorkflowEvent
 from tmcalib.profiles import PROFILES, get_profile
 from tmcalib.workflow import CalibrationWorkflow, WorkflowState
 from tmcalib_gui.launcher import format_profile_summary
+from tm_recovery_algorithms import ALGORITHMS, canonical_algorithm
 
 
 class QtEventBridge(QObject):
@@ -52,6 +53,7 @@ class MainWindow(QMainWindow):
         self._bridge.switch_finished.connect(self._finish_configuration_switch)
         self._last_frame: Optional[np.ndarray] = None
         self._configuration_switching = False
+        self._updating_recovery_algorithm = False
 
         self.setWindowTitle("TMCalib 传输矩阵标定平台")
         self.setMinimumSize(1100, 720)
@@ -153,6 +155,13 @@ class MainWindow(QMainWindow):
         self.profile_summary.setWordWrap(True)
         config_layout.addRow("Profile", self.profile_combo)
         config_layout.addRow("偏振通道", self.channel_combo)
+
+        self.recovery_combo = QComboBox()
+        self.recovery_combo.addItems(tuple(ALGORITHMS) + ("prVAM",))
+        self.recovery_combo.currentTextChanged.connect(
+            self._recovery_algorithm_changed
+        )
+        config_layout.addRow("32×24 恢复算法", self.recovery_combo)
         config_layout.addRow(self.profile_summary)
         layout.addWidget(config_group)
 
@@ -281,6 +290,7 @@ class MainWindow(QMainWindow):
         self.focus_y.setRange(0, roi_h - 1)
         self.focus_x.setValue(roi_w // 2)
         self.focus_y.setValue(roi_h // 2)
+        self._update_recovery_algorithm_control(profile)
         self._apply_capabilities(profile)
 
         # Profile modules specialize dimensions and encoder globals in the
@@ -308,6 +318,35 @@ class MainWindow(QMainWindow):
             connected and profile.supports("pixelwise_report")
         )
         self.one_click_button.setEnabled(connected and profile.supports("one_click"))
+        selectable = profile.key in ("v4_32x24", "v4_32x24_cholesky")
+        if self.workflow is not None:
+            selectable = selectable and self.workflow.state in (
+                WorkflowState.DISCONNECTED,
+                WorkflowState.IDLE,
+                WorkflowState.ERROR,
+            )
+        self.recovery_combo.setEnabled(selectable)
+
+    def _update_recovery_algorithm_control(self, profile) -> None:
+        """Reset/disable the 32×24-only selector during profile changes."""
+        supported = profile.key in ("v4_32x24", "v4_32x24_cholesky")
+        self._updating_recovery_algorithm = True
+        try:
+            if not supported:
+                self.recovery_combo.setCurrentText("GGS21")
+        finally:
+            self._updating_recovery_algorithm = False
+
+    def _recovery_algorithm_changed(self, name: str) -> None:
+        if self._updating_recovery_algorithm:
+            return
+        try:
+            algorithm = canonical_algorithm(name)
+            if self.workflow is not None:
+                self.workflow.set_reconstruction_algorithm(algorithm)
+            self._append_log("32×24 TM recovery algorithm: {}".format(algorithm))
+        except Exception as exc:
+            self._show_error(str(exc))
 
     def _subscribe_workflow(self, workflow: CalibrationWorkflow) -> None:
         self._unsubscribers = [
@@ -399,6 +438,19 @@ class MainWindow(QMainWindow):
             )
             self.workflow = workflow
             self._subscribe_workflow(workflow)
+            if (
+                self._selected_profile_key() in (
+                    "v4_32x24",
+                    "v4_32x24_cholesky",
+                )
+                and hasattr(
+                    workflow.services.reconstruction,
+                    "set_reconstruction_algorithm",
+                )
+            ):
+                workflow.set_reconstruction_algorithm(
+                    canonical_algorithm(self.recovery_combo.currentText())
+                )
             workflow.connect()
             self.profile_combo.setEnabled(False)
             self.channel_combo.setEnabled(False)

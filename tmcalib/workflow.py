@@ -169,6 +169,27 @@ class CalibrationWorkflow:
         self._log("exposure", "Exposure set to {:.1f} us".format(actual))
         return actual
 
+    def set_reconstruction_algorithm(self, name: str) -> str:
+        """Select a backend-specific recovery method while the workflow is idle."""
+        setter = getattr(self.services.reconstruction, "set_reconstruction_algorithm", None)
+        if setter is None:
+            raise RuntimeError(
+                "This reconstruction backend does not expose algorithm selection"
+            )
+        if self.state not in (
+            WorkflowState.DISCONNECTED,
+            WorkflowState.IDLE,
+            WorkflowState.ERROR,
+        ):
+            raise RuntimeError(
+                "Cannot change the reconstruction algorithm while workflow state is {}".format(
+                    self.state.value
+                )
+            )
+        algorithm = setter(name)
+        self._log("reconstruction", "Recovery algorithm set to {}".format(algorithm))
+        return algorithm
+
     def start_preview(self) -> None:
         if not self.profile.supports("preview"):
             raise RuntimeError("Preview is unavailable for this profile")

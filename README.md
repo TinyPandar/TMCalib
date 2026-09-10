@@ -1,6 +1,6 @@
 # TMCalib
 
-用于 JUOPT DLP/DMD 与 FLIR/Teledyne 偏振相机的传输矩阵（Transmission Matrix, TM）测量、GGS2-1 重建和逐点聚焦验证程序。
+用于 JUOPT DLP/DMD 与 FLIR/Teledyne 偏振相机的传输矩阵（Transmission Matrix, TM）测量、多算法恢复和逐点聚焦验证程序。
 
 本仓库由原实验目录中的 `combined_app_v4.py`、`combined_app_v4_128.py` 和 `llh_v2` 整理而成。实验数据、厂商 SDK 和历史代码快照没有复制进仓库。
 
@@ -35,6 +35,7 @@ tmcalib-repo/
 ├── dmd_pattern_160x120.py             # 160×120→256×192 SP→全 DMD 映射
 ├── dmd_pattern_128.py                 # 中央 512×512 DMD 映射
 ├── tm_reconstruction_128.py           # 通用分块 GGS2-1 重建器
+├── tm_recovery_algorithms.py          # 32×24 多算法相位恢复核心
 ├── low_precision_pinv.py              # 低精度逆矩阵存储/计算
 ├── holograms/                          # 仓库内全息编码实现
 ├── tools/                              # 数据生成、诊断和分析工具
@@ -164,5 +165,6 @@ python -m unittest discover -s tests -v
 - 经过实验使用的 PySpin/JUOPT 触发与采集顺序保留在兼容适配器之后；旧 `run_calibration.py` 和 Tk 入口仍可用于硬件回退对照。
 - 128×96 Profile 使用对齐的 8×8 DMD 宏像素和 8N probe，复用 128×128 相机采集、低显存重建及整数倍 GPU 聚焦编码流程。
 - 26×26 的 I0/I90 不再维护相机/DMD/GUI 副本；160×120 和 128×96 的映射差异由 Profile 与编码策略隔离。
+- 32×24 主程序保留原有 GGS21/Cholesky 流程，并提供 GS、RAF21、RAF、AF、TAF、WF、prVBEM、prVAMP（兼容 prVAM）备选恢复算法；详见 [32×24 恢复算法](docs/RECOVERY_ALGORITHMS.md)。
 - 架构边界、扩展规则和测试策略见 [模块化架构](docs/ARCHITECTURE.md)。
 - 项目当前未附带开源许可证；公开发布前请由代码所有者选择许可证。

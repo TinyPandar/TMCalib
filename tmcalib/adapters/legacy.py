@@ -7,6 +7,7 @@ from typing import Optional
 
 from tmcalib.ports import FrameCallback, OperationResult, ProgressCallback
 from tmcalib.profiles import ProfileSpec
+from tm_recovery_algorithms import canonical_algorithm
 
 
 class LegacyHardwareAdapter:
@@ -22,6 +23,7 @@ class LegacyHardwareAdapter:
         self._pixelwise_stop = threading.Event()
         self._exposure_us = float(profile.default_exposure_us)
         self._load_lock = threading.Lock()
+        self._recovery_algorithm = "GGS21"
 
     @property
     def camera(self):
@@ -92,6 +94,25 @@ class LegacyHardwareAdapter:
             self._camera = camera_class(**camera_kwargs)
             self._camera.convert_to_12bit = False
             self._controller = controller_module.DMDController(self._camera)
+            self._controller.recovery_algorithm = self._recovery_algorithm
+
+    def set_reconstruction_algorithm(self, name: str) -> str:
+        """Select the next local TM recovery algorithm.
+
+        The alternative solvers are currently scoped to the 32×24 legacy
+        controller.  Keeping the selection here lets both Tk and Qt use the
+        same lazy-loading adapter without importing vendor SDKs early.
+        """
+        if self.profile.key not in ("v4_32x24", "v4_32x24_cholesky"):
+            raise ValueError(
+                "Alternative recovery algorithms are currently available only "
+                "for the 32×24 profile"
+            )
+        algorithm = canonical_algorithm(name)
+        self._recovery_algorithm = algorithm
+        if self._controller is not None:
+            self._controller.recovery_algorithm = algorithm
+        return algorithm
 
     def connect(self) -> OperationResult:
         controller = self.controller

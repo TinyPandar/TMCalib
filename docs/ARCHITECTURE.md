@@ -21,7 +21,7 @@ flowchart TD
 - Camera outputs: 128×128 or 26×26.
 - Polarization channels: I0 or I90.
 - Pattern sets: 64-frame optical test, 4N, or 8N.
-- Reconstruction: ordinary pseudoinverse, Cholesky, or planar-complex32 low-precision inverse.
+- Reconstruction: ordinary pseudoinverse, Cholesky, or planar-complex32 low-precision inverse; the 32×24 profile additionally exposes hardware-independent GS/RAF/AF/TAF/WF/prVBEM/prVAMP recovery variants.
 
 Stable identifiers remain defined in `calibration_profiles.py`. Output names must
 include the input Profile, pattern set, and polarization channel where relevant.

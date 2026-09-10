@@ -45,6 +45,7 @@ from measurement_quality_report import (
     save_measurement_quality_outputs,
 )
 from tmcalib.focus_modes import prepare_conjugate_focus_field
+from tm_recovery_algorithms import ALGORITHMS, RecoverySolver, canonical_algorithm
 
 try:
     import paramiko
@@ -61,7 +62,7 @@ CAMERA_EXPOSURE_US = 1500.0
 # Pre-generated 32 x 24 pattern dataset selection. Change only ``active`` to
 # switch datasets; the probe count and reconstruction input are kept in sync.
 PATTERN_CONFIG = {
-    "active": "20N_4PHASE",
+    "active": "8N",
     "sets": {
         "4N": {
             "directory": "pregenerated_patterns",
@@ -745,6 +746,15 @@ class DMDController:
         self.ggs21_use_gpu = True
         # Use the same initial detector phases when comparing linear solvers.
         self.ggs21_random_seed = 24032
+        # Hardware-independent alternatives for the 32 x 24 (768-mode)
+        # recovery path.  GGS21 keeps the legacy implementation below;
+        # every other choice is dispatched to RecoverySolver.
+        self.recovery_algorithm = "GGS21"
+        self.recovery_block_size = 128
+        self.recovery_power_iterations = 8
+        self.recovery_damping = 0.5
+        self.recovery_step = None
+        self.recovery_ratio = None
         # Pixel-wise hologram encoding uses the first CUDA device when
         # available and falls back to the bit-exact NumPy implementation.
         self.focus_encoding_use_gpu = True
@@ -1485,6 +1495,242 @@ class DMDController:
         H_mm = None
 
         try:
+            algorithm_name = canonical_algorithm(
+                getattr(self, "recovery_algorithm", "GGS21")
+            )
+
+            # The legacy GGS21 branch below retains the tested pseudoinverse
+            # and Cholesky variants.  The alternative methods share one
+            # hardware-independent solver and use the same block/file layout.
+            if algorithm_name != "GGS21":
+                print(
+                    "Starting {} transmission-matrix recovery...".format(
+                        algorithm_name
+                    )
+                )
+
+                N_in = self.dmd_width * self.dmd_height
+                pattern_config = get_active_pattern_config()
+                roi_w = int(getattr(self.camera, "roi_width", 128))
+                roi_h = int(getattr(self.camera, "roi_height", 128))
+                N_out = roi_w * roi_h
+                base_dir = os.getcwd()
+                meas_file = os.path.join(
+                    base_dir,
+                    pattern_config.get(
+                        "measurement_filename", "measurements_memmap.npy"
+                    ),
+                )
+                H_file = os.path.join(
+                    base_dir,
+                    getattr(
+                        self,
+                        "tm_memmap_filename",
+                        "transmission_matrix_memmap.npy",
+                    ),
+                )
+                cache_file = os.path.join(
+                    base_dir,
+                    getattr(
+                        self,
+                        "reconstructed_filename",
+                        "reconstructed_field.npy",
+                    ),
+                )
+                err_file = os.path.join(
+                    base_dir,
+                    getattr(
+                        self,
+                        "error_curve_filename",
+                        "recovery_error.npy",
+                    ),
+                )
+                partial_file = H_file + ".partial"
+
+                if not os.path.exists(meas_file):
+                    raise FileNotFoundError(
+                        "Measurement file not found: {}".format(meas_file)
+                    )
+
+                probe_candidates = [
+                    os.path.join(pattern_config.get("directory", base_dir), "probe.npy"),
+                    os.path.join(base_dir, "probe.npy"),
+                    os.path.join(base_dir, "probes.npy"),
+                ]
+                probe_file = next(
+                    (path for path in probe_candidates if os.path.exists(path)),
+                    None,
+                )
+                if probe_file is None:
+                    raise FileNotFoundError(
+                        "Neither probe.npy nor probes.npy was found"
+                    )
+
+                probes = np.load(probe_file, mmap_mode="r")
+                if probes.ndim == 3:
+                    expected_shape = (self.dmd_height, self.dmd_width)
+                    if tuple(probes.shape[1:]) != expected_shape:
+                        raise ValueError(
+                            "Probe spatial shape {} does not match DMD shape {}".format(
+                                probes.shape[1:], expected_shape
+                            )
+                        )
+                    X_np = probes.reshape(probes.shape[0], N_in)
+                elif probes.ndim == 2:
+                    if probes.shape[1] == N_in:
+                        X_np = probes
+                    elif probes.shape[0] == N_in:
+                        X_np = probes.T
+                    else:
+                        raise ValueError(
+                            "Probe shape {} is incompatible with N_in={}".format(
+                                probes.shape, N_in
+                            )
+                        )
+                else:
+                    raise ValueError(
+                        "Probes must be 2-D or 3-D, got {}".format(probes.shape)
+                    )
+
+                M = int(X_np.shape[0])
+                expected_bytes = M * N_out * np.dtype(np.uint16).itemsize
+                actual_bytes = os.path.getsize(meas_file)
+                if actual_bytes != expected_bytes:
+                    raise ValueError(
+                        "Measurement file size mismatch: got {} bytes, expected {} "
+                        "bytes for shape ({}, {}) uint16".format(
+                            actual_bytes, expected_bytes, M, N_out
+                        )
+                    )
+
+                measurements = np.memmap(
+                    meas_file, dtype=np.uint16, mode="r", shape=(M, N_out)
+                )
+                use_gpu = bool(getattr(self, "ggs21_use_gpu", True))
+                device = torch.device(
+                    "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
+                )
+                if use_gpu and device.type != "cuda":
+                    print("Warning: CUDA unavailable, using CPU.")
+                X = torch.as_tensor(
+                    np.array(X_np, dtype=np.complex64, copy=True, order="C"),
+                    dtype=torch.complex64,
+                    device=device,
+                )
+                solver = RecoverySolver(
+                    X,
+                    algorithm_name,
+                    iterations=int(getattr(self, "ggs21_iters", 200)),
+                    ratio=getattr(self, "recovery_ratio", None),
+                    step=getattr(self, "recovery_step", None),
+                    damping=float(getattr(self, "recovery_damping", 0.5)),
+                    power_iterations=int(
+                        getattr(self, "recovery_power_iterations", 8)
+                    ),
+                )
+
+                block_size = max(
+                    1,
+                    int(
+                        getattr(
+                            self,
+                            "recovery_block_size",
+                            max(1, math.ceil(N_out / max(1, int(getattr(self, "ggs21_n_worker", 8))))),
+                        )
+                    ),
+                )
+                H_shape = (N_out, N_in)
+                H_mm = np.memmap(
+                    partial_file,
+                    dtype=np.complex64,
+                    mode="w+",
+                    shape=H_shape,
+                )
+                error_sum = np.zeros(solver.iterations, dtype=np.float64)
+                dark_level = float(getattr(self, "ggs21_dark_level", 0.0))
+                measurements_are_intensity = bool(
+                    getattr(self, "measurements_are_intensity", True)
+                )
+                start_time = time.perf_counter()
+
+                with torch.inference_mode():
+                    for start in range(0, N_out, block_size):
+                        stop = min(start + block_size, N_out)
+                        measured = np.asarray(
+                            measurements[:, start:stop], dtype=np.float32
+                        ).copy()
+                        if dark_level:
+                            measured -= dark_level
+                        np.maximum(measured, 0.0, out=measured)
+                        if measurements_are_intensity:
+                            np.sqrt(measured, out=measured)
+                        amplitude = torch.as_tensor(
+                            measured, dtype=torch.float32, device=device
+                        )
+                        h_block, block_error = solver.solve(
+                            amplitude,
+                            seed=int(getattr(self, "ggs21_random_seed", 24032))
+                            + start,
+                        )
+                        H_mm[start:stop] = h_block.cpu().numpy()
+                        H_mm.flush()
+                        error_sum += block_error.cpu().numpy() * (stop - start)
+                        callback = getattr(self, "recon_progress_callback", None)
+                        if callback:
+                            callback(
+                                100.0 * stop / N_out,
+                                "{} recovery: {}/{} pixels".format(
+                                    algorithm_name, stop, N_out
+                                ),
+                            )
+                        del measured, amplitude, h_block, block_error
+
+                H_mm.flush()
+                del H_mm
+                H_mm = None
+                os.replace(partial_file, H_file)
+                error_curve = (error_sum / max(1, N_out)).astype(np.float32)
+                np.save(err_file, error_curve)
+
+                # Keep the selected result in the normal focus-compatible
+                # location and also preserve a method-specific comparison
+                # artifact, e.g. reconstructed_field_..._raf21.npy.
+                H_source = np.memmap(
+                    H_file, dtype=np.complex64, mode="r", shape=H_shape
+                )
+                np.save(cache_file, H_source)
+                algorithm_tag = algorithm_name.lower()
+                cache_root, cache_ext = os.path.splitext(cache_file)
+                err_root, err_ext = os.path.splitext(err_file)
+                tm_root, tm_ext = os.path.splitext(H_file)
+                variant_cache_file = cache_root + "_" + algorithm_tag + cache_ext
+                variant_err_file = err_root + "_" + algorithm_tag + err_ext
+                variant_tm_file = tm_root + "_" + algorithm_tag + tm_ext
+                if variant_cache_file != cache_file:
+                    np.save(variant_cache_file, H_source)
+                if variant_err_file != err_file:
+                    np.save(variant_err_file, error_curve)
+                if variant_tm_file != H_file:
+                    variant_mm = np.memmap(
+                        variant_tm_file,
+                        dtype=np.complex64,
+                        mode="w+",
+                        shape=H_shape,
+                    )
+                    variant_mm[:] = H_source[:]
+                    variant_mm.flush()
+                    del variant_mm
+                del H_source
+                elapsed = time.perf_counter() - start_time
+                print(
+                    "{} transmission-matrix recovery completed in {:.2f} seconds.".format(
+                        algorithm_name, elapsed
+                    )
+                )
+                print("Transmission matrix saved to:", H_file)
+                print("Error curve saved to:", err_file)
+                return
+
             print("Starting GGS 2-1 reconstruction...")
 
             # ==================== 基本参数 ====================
@@ -3571,6 +3817,26 @@ class Application(tk.Tk):
         )
         self.btn_tm_recovery.pack(fill=tk.X, pady=2)
 
+        # Recovery algorithm selection is intentionally kept next to the TM
+        # action.  All alternatives use the same measured probes and output
+        # layout, so changing this control never changes the acquisition data.
+        ttk.Label(tm_frame, text="Recovery algorithm (32×24):").pack(
+            anchor=tk.W, pady=(6, 1)
+        )
+        self.recovery_algorithm_var = tk.StringVar(
+            value=self.dmd_controller.recovery_algorithm
+        )
+        self.recovery_algorithm_combo = ttk.Combobox(
+            tm_frame,
+            textvariable=self.recovery_algorithm_var,
+            values=tuple(ALGORITHMS) + ("prVAM",),
+            state="readonly",
+        )
+        self.recovery_algorithm_combo.pack(fill=tk.X, pady=2)
+        self.recovery_algorithm_combo.bind(
+            "<<ComboboxSelected>>", self._on_recovery_algorithm_changed
+        )
+
         # Remote TM via server (upload measurements_memmap -> run GGS2_1 -> download TM)
         self.btn_tm_remote = ttk.Button(
             tm_frame,
@@ -3969,6 +4235,17 @@ class Application(tk.Tk):
         self.measure_progress_label.config(text="Measurement stopped")
         self.recon_progress_label.config(text="Reconstruction stopped")
         self.log("Measurement/optimization process stopped")
+
+    def _on_recovery_algorithm_changed(self, _event=None):
+        """Apply the selected recovery method to the next local run."""
+        selected = self.recovery_algorithm_var.get().strip()
+        try:
+            algorithm = canonical_algorithm(selected)
+        except ValueError as exc:
+            self.log(str(exc))
+            return
+        self.dmd_controller.recovery_algorithm = algorithm
+        self.log("TM recovery algorithm selected: {}".format(algorithm))
 
     def recover_transmission_matrix(self):
         """Recover transmission matrix"""

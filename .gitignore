@@ -65,6 +65,7 @@ desktop.ini
 /pregenerated_patterns*/
 /physical_jones_tm_output*/
 /physical_jones_tm_runs/
+/tm_validation_results/
 
 # Generated reconstruction/report metadata
 /average_speckle_intensity_*.json
