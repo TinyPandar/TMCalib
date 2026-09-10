@@ -62,7 +62,7 @@ CAMERA_EXPOSURE_US = 1500.0
 # Pre-generated 32 x 24 pattern dataset selection. Change only ``active`` to
 # switch datasets; the probe count and reconstruction input are kept in sync.
 PATTERN_CONFIG = {
-    "active": "8N",
+    "active": "8N_MIXED",
     "sets": {
         "4N": {
             "directory": "pregenerated_patterns",
@@ -71,6 +71,11 @@ PATTERN_CONFIG = {
         "8N": {
             "directory": "pregenerated_patterns_8N",
             "probe_multiplier": 8,
+        },
+        "8N_MIXED": {
+            "directory": "pregenerated_patterns_8N_mixed",
+            "probe_multiplier": 8,
+            "output_tag": "32x24_8N_mixed",
         },
         "12N": {
             "directory": "pregenerated_patterns_v4_phase_only_12N",

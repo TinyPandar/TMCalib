@@ -166,5 +166,6 @@ python -m unittest discover -s tests -v
 - 128×96 Profile 使用对齐的 8×8 DMD 宏像素和 8N probe，复用 128×128 相机采集、低显存重建及整数倍 GPU 聚焦编码流程。
 - 26×26 的 I0/I90 不再维护相机/DMD/GUI 副本；160×120 和 128×96 的映射差异由 Profile 与编码策略隔离。
 - 32×24 主程序保留原有 GGS21/Cholesky 流程，并提供 GS、RAF21、RAF、AF、TAF、WF、prVBEM、prVAMP（兼容 prVAM）备选恢复算法；详见 [32×24 恢复算法](docs/RECOVERY_ALGORITHMS.md)。
+- 32×24 默认使用 `8N_MIXED` probe：前 4N 为固定振幅随机相位，后 4N 为固定相位随机振幅；振幅按 0.1 从 0 到 1 量化。首次使用前运行 `python tools/generate_mixed_probe_32x24.py` 生成匹配的 probe 和 DMD pattern。
 - 架构边界、扩展规则和测试策略见 [模块化架构](docs/ARCHITECTURE.md)。
 - 项目当前未附带开源许可证；公开发布前请由代码所有者选择许可证。
