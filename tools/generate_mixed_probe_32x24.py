@@ -86,22 +86,24 @@ def generate(output_dir, seed=DEFAULT_SEED, batch_size=DEFAULT_BATCH_SIZE):
     lut_fields, tiles, lut, center = _build_lut_assets()
     rng = np.random.default_rng(int(seed))
     try:
-        for start in range(0, count, int(batch_size)):
-            stop = min(start + int(batch_size), count)
+        group_boundary = GROUP_MULTIPLIER * N_IN
+        for group_start, group_stop in ((0, group_boundary), (group_boundary, count)):
+            for start in range(group_start, group_stop, int(batch_size)):
+                stop = min(start + int(batch_size), group_stop)
             size = stop - start
-            if start < GROUP_MULTIPLIER * N_IN:
-                requested = np.exp(1j * rng.uniform(-np.pi, np.pi, (size, N_Y, N_X)))
-                group = "fixed_amplitude_random_phase"
-            else:
-                amplitudes = AMPLITUDE_LEVELS[rng.integers(0, len(AMPLITUDE_LEVELS), (size, N_Y, N_X))]
-                requested = amplitudes.astype(np.complex64)
-                group = "fixed_phase_random_amplitude"
-            requested = requested.astype(np.complex64)
-            probes[start:stop] = _lookup(lut_fields, lut, requested, center)
-            patterns[start:stop] = _encode(requested, tiles, center)
-            probes.flush()
-            patterns.flush()
-            print(f"\rGenerating mixed 8N probes: {stop}/{count} ({group})", end="", flush=True)
+                if group_start == 0:
+                    requested = np.exp(1j * rng.uniform(-np.pi, np.pi, (size, N_Y, N_X)))
+                    group = "fixed_amplitude_random_phase"
+                else:
+                    amplitudes = AMPLITUDE_LEVELS[rng.integers(0, len(AMPLITUDE_LEVELS), (size, N_Y, N_X))]
+                    requested = amplitudes.astype(np.complex64)
+                    group = "fixed_phase_random_amplitude"
+                requested = requested.astype(np.complex64)
+                probes[start:stop] = _lookup(lut_fields, lut, requested, center)
+                patterns[start:stop] = _encode(requested, tiles, center)
+                probes.flush()
+                patterns.flush()
+                print(f"\rGenerating mixed 8N probes: {stop}/{count} ({group})", end="", flush=True)
     finally:
         del probes
         del patterns
